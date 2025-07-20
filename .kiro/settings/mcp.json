@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "aws-health2": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "awslabs.aws_health_mcp_server"
+      ],
+      "env": {},
+      "disabled": false,
+      "autoApprove": [
+        "get_service_health",
+        "get_org_health_events",
+        "get_service_events",
+        "get_scheduled_changes",
+        "get_affected_entities",
+        "get_completed_events",
+        "get_org_service_health",
+        "get_org_affected_entities",
+        "get_org_service_events",
+        "get_org_account_events",
+        "get_org_scheduled_changes",
+        "get_org_account_events"
+      ]
+    }
+  }
+}

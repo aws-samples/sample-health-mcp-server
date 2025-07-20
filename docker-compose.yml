@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  aws-health-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aws-health-mcp-server
+    restart: unless-stopped
+    environment:
+      # AWS Credentials - Set these via environment variables or .env file
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_PROFILE=${AWS_PROFILE}
+    volumes:
+      # Mount AWS credentials directory (optional, for AWS CLI profiles)
+      - ~/.aws:/home/appuser/.aws:ro
+    ports:
+      # Expose port for potential future HTTP interface
+      - "8000:8000"
+    # For MCP servers that use stdio, you might want to run interactively
+    stdin_open: true
+    tty: true
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import awslabs.aws_health_mcp_server; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
