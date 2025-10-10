@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "aws-health2": {
-      "command": "python3",
+    "aws-health1": {
+      "command": "/Users/jsanketh/Desktop/AWS_Health_MCP/test_env/bin/python3",
       "args": [
         "-m",
         "awslabs.aws_health_mcp_server"
@@ -21,6 +21,47 @@
         "get_org_account_events",
         "get_org_scheduled_changes",
         "get_org_account_events"
+      ]
+    },
+    "awslabs.aws-api-mcp-server": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "awslabs.aws_api_mcp_server.server"
+      ],
+      "env": {
+        "AWS_REGION": "us-east-1"
+      },
+      "disabled": false,
+      "autoApprove": []
+    },
+    "eks-mcp-server": {
+      "command": "uvx",
+      "args": [
+        "awslabs.eks-mcp-server@latest"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "list_api_versions"
+      ]
+    },
+    "awslabs.cloudwatch-mcp-server": {
+      "command": "uvx",
+      "args": [
+        "awslabs.cloudwatch-mcp-server@latest"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "execute_log_insights_query",
+        "get_logs_insight_query_results",
+        "describe_log_groups",
+        "analyze_log_group"
       ]
     }
   }
