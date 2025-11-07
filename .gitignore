@@ -19,19 +19,27 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# Virtual Environment
-venv/
+# Virtual environments
+.env
+.venv
 env/
+venv/
 ENV/
+env.bak/
+venv.bak/
+test_env/
+prod_env/
 
-# IDE files
-.idea/
+# IDE
 .vscode/
+.idea/
 *.swp
 *.swo
+*~
 
-# OS specific files
+# OS
 .DS_Store
 .DS_Store?
 ._*
@@ -40,10 +48,30 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
+# Logs
+*.log
+logs/
+.aws-health-mcp/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
 # AWS
 .aws/
-.aws-sam/
 
-# Logs
-logs/
-*.log
+# Local configuration
+.env.local
+config.local.json
