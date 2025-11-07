@@ -11,7 +11,7 @@ A production-ready MCP (Model Context Protocol) server for AWS Health API that p
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - AWS credentials with appropriate permissions
 - AWS Business or Enterprise Support plan (required for Health API access)
 - For organization features: AWS Organizations enabled with proper permissions
