@@ -1,187 +1,119 @@
 # AWS Health MCP Server
 
-A production-ready MCP (Model Context Protocol) server for AWS Health API that provides comprehensive visibility into AWS service health events across both individual accounts and entire AWS Organizations.
-
-## Features
-
-- **Account-Level Health Monitoring**: View current AWS service health events, affected resources, and service-specific issues
-- **Organization-Level Health Monitoring**: Monitor health events across all accounts in your AWS Organization
-- **Production Features**: Comprehensive error handling, retry logic, structured logging, and health checks
-- **Easy Integration**: Simple setup with Q CLI, Claude Desktop, or any MCP-compatible client
+MCP server that exposes AWS Health API as tools. Works with Claude Desktop, Kiro, Amazon Q CLI, or any MCP-compatible client.
 
 ## Prerequisites
 
 - Python 3.10+
-- AWS credentials with appropriate permissions
-- AWS Business or Enterprise Support plan (required for Health API access)
-- For organization features: AWS Organizations enabled with proper permissions
+- AWS credentials configured (`aws configure` or environment variables)
+- AWS **Business or Enterprise Support** plan (required for Health API)
+- For org-level tools: AWS Organizations with Health service access enabled
 
-## Quick Start
+## Setup
 
-### 1. Install
+Add this to your MCP config file:
 
-```bash
-pip install aws-health-mcp-server
-```
+- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Kiro**: `~/.kiro/settings/mcp.json`
+- **Amazon Q CLI**: `~/.aws/amazonq/mcp.json`
 
-### 2. Configure AWS Credentials
-
-```bash
-aws configure
-```
-
-### 3. Add to MCP Client
-
-Add to your MCP configuration (e.g., Claude Desktop, Q CLI):
+### Using uvx (recommended)
 
 ```json
 {
   "mcpServers": {
     "aws-health": {
-      "command": "aws-health-mcp-server",
-      "args": [],
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/jsanketh/aws-health-mcp-server", "aws-health-mcp-server"],
       "env": {
-        "AWS_REGION": "us-east-1"
+        "AWS_PROFILE": "default"
       }
     }
   }
 }
 ```
 
-### 4. Start Using
+### From a local clone
 
-Ask your MCP client:
-- "What's the current AWS service health status?"
-- "Show me any active AWS incidents"
-- "Are there any scheduled AWS maintenance events?"
-
-## Available Tools
-
-### Account-Level Tools
-- `get_service_health()` - Current AWS service health events
-- `get_affected_entities()` - Resources affected by health events
-- `get_service_events(service)` - Health events for specific services
-- `get_completed_events()` - Recently resolved incidents
-- `get_scheduled_changes()` - Upcoming maintenance events
-
-### Organization-Level Tools
-- `get_org_health_events()` - Health events across your organization
-- `get_org_service_health()` - Organization-wide service health
-- `get_org_affected_entities()` - Affected entities across accounts
-- `get_org_service_events(service)` - Service events across organization
-- `get_org_account_events(account_id)` - Events for specific accounts
-- `get_org_scheduled_changes()` - Organization-wide scheduled changes
-
-## Configuration
-
-### Environment Variables
-
-```bash
-# AWS Configuration
-export AWS_REGION=us-east-1
-export AWS_PROFILE=my-profile  # Optional
-
-# Logging
-export LOG_LEVEL=INFO
-
-# API Configuration  
-export HEALTH_API_TIMEOUT=30
-```
-
-### Example Configurations
-
-#### Q CLI Configuration
 ```json
 {
   "mcpServers": {
     "aws-health": {
-      "command": "aws-health-mcp-server",
-      "args": [],
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/aws-health-mcp-server", "aws-health-mcp-server"],
       "env": {
-        "LOG_LEVEL": "INFO",
-        "AWS_REGION": "us-east-1"
+        "AWS_PROFILE": "default"
       }
     }
   }
 }
 ```
 
-#### Claude Desktop Configuration
-```json
-{
-  "mcpServers": {
-    "aws-health": {
-      "command": "aws-health-mcp-server",
-      "args": []
-    }
-  }
-}
+That's it. `uv` handles the venv and dependencies automatically.
+
+## Tools
+
+### Account-Level
+
+| Tool | Description |
+|------|-------------|
+| `get_service_health` | All active health events |
+| `get_affected_entities` | Resources impacted by open events |
+| `get_service_events(service)` | Events for a specific service (e.g., EC2, RDS) |
+| `get_completed_events(service?)` | Recently resolved events |
+| `get_scheduled_changes` | Upcoming maintenance |
+
+### Organization-Level
+
+| Tool | Description |
+|------|-------------|
+| `get_org_health_events(service?, account_id?, status?)` | Events across all accounts |
+| `get_org_service_health` | Active events org-wide |
+| `get_org_affected_entities(account_id?, event_arn?)` | Impacted resources across accounts |
+| `get_org_service_events(service)` | Service-specific events org-wide |
+| `get_org_account_events(account_id)` | Events for a specific account |
+| `get_org_scheduled_changes` | Org-wide scheduled maintenance |
+
+## Example Prompts
+
+- "Are there any active AWS health events?"
+- "What's happening with EC2 right now?"
+- "Show me scheduled maintenance across my organization"
+- "What resources are affected by current issues in account 123456789012?"
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AWS_PROFILE` | none | AWS credentials profile |
+| `AWS_REGION` | `us-east-1` | Region (Health API is us-east-1 only) |
+| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`) |
+| `HEALTH_API_TIMEOUT` | `30` | API timeout in seconds |
+
+## Troubleshooting
+
+**"SubscriptionRequiredException"** — You need AWS Business or Enterprise Support.
+
+**"AccessDeniedException"** — Your IAM user/role needs `health:Describe*` permissions.
+
+**Org tools return access error** — Enable Health service access from your management account:
+```bash
+aws health enable-health-service-access-for-organization
 ```
+
+**Server not starting** — Check the MCP client logs. Common issues:
+- Wrong Python path in config (use the full `.venv/bin/python` path)
+- Missing dependencies (run `pip install -e .` in the venv)
 
 ## Development
-
-### Install from Source
 
 ```bash
 git clone https://github.com/jsanketh/aws-health-mcp-server.git
 cd aws-health-mcp-server
-pip install -e ".[dev]"
+uv sync --extra dev
+uv run pytest tests/ -v
 ```
-
-### Build Package
-
-```bash
-python -m build
-```
-
-### Run Tests
-
-```bash
-pytest tests/
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**"SubscriptionRequiredException"**
-- Solution: Upgrade to AWS Business or Enterprise Support plan
-
-**"AccessDeniedException"**  
-- Solution: Ensure your AWS credentials have Health API permissions
-
-**Organization features not working**
-- Solution: Enable Health service access for your organization from the management account
-
-### Debug Mode
-
-```bash
-LOG_LEVEL=DEBUG aws-health-mcp-server
-```
-
-## Requirements
-
-- AWS Business or Enterprise Support subscription
-- IAM permissions for AWS Health API
-- For organization features: Health service enabled for AWS Organizations
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## Support
-
-- [GitHub Issues](https://github.com/jsanketh/aws-health-mcp-server/issues)
-- [Documentation](https://github.com/jsanketh/aws-health-mcp-server)
-
----
-
-Built with ❤️ 
+MIT

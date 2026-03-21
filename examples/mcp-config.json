@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "aws-health": {
-      "command": "aws-health-mcp-server",
-      "args": [],
+      "command": "python",
+      "args": ["-m", "aws_health_mcp.server"],
       "env": {
-        "LOG_LEVEL": "INFO",
-        "AWS_REGION": "us-east-1"
+        "AWS_PROFILE": "default",
+        "LOG_LEVEL": "WARNING"
       }
     }
   }
