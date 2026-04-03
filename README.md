@@ -17,20 +17,26 @@ Add this to your MCP config file:
 - **Kiro**: `~/.kiro/settings/mcp.json`
 - **Amazon Q CLI**: `~/.aws/amazonq/mcp.json`
 
-### Using uvx (recommended)
+### Using uvx from PyPI (recommended)
 
 ```json
 {
   "mcpServers": {
     "aws-health": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/jsanketh/aws-health-mcp-server", "aws-health-mcp-server"],
+      "args": ["aws-health-mcp-server"],
       "env": {
         "AWS_PROFILE": "default"
       }
     }
   }
 }
+```
+
+### Using pip
+
+```bash
+pip install aws-health-mcp-server
 ```
 
 ### From a local clone
