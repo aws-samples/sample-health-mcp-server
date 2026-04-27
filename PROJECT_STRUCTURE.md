@@ -29,7 +29,7 @@ aws-health-mcp-server/
 ├── .gitignore                   # Git ignore rules
 ├── CODE_OF_CONDUCT.md           # Community guidelines
 ├── CONTRIBUTING.md              # Contribution guidelines
-├── LICENSE                      # MIT license
+├── LICENSE                      # MIT-0 license
 ├── PROJECT_STRUCTURE.md         # This file
 ├── README.md                    # Main documentation
 └── pyproject.toml               # Python project configuration

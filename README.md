@@ -124,4 +124,4 @@ uv run pytest tests/ -v
 
 ## License
 
-MIT
+MIT-0
