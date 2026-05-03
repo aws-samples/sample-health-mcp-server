@@ -43,10 +43,10 @@ dev = [
 aws-health-mcp-server = "aws_health_mcp.server.__main__:main"
 
 [project.urls]
-Homepage = "https://gitlab.aws.dev/jsanketh/aws-health-mcp-server"
-Repository = "https://gitlab.aws.dev/jsanketh/aws-health-mcp-server.git"
-Issues = "https://gitlab.aws.dev/jsanketh/aws-health-mcp-server/-/issues"
-Documentation = "https://gitlab.aws.dev/jsanketh/aws-health-mcp-server/-/blob/main/README.md"
+Homepage = "https://github.com/aws-samples/sample-health-mcp-server"
+Repository = "https://github.com/aws-samples/sample-health-mcp-server.git"
+Issues = "https://github.com/aws-samples/sample-health-mcp-server/issues"
+Documentation = "https://github.com/aws-samples/sample-health-mcp-server/blob/main/README.md"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

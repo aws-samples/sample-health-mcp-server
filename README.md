@@ -116,7 +116,7 @@ aws health enable-health-service-access-for-organization
 ## Development
 
 ```bash
-git clone https://gitlab.aws.dev/jsanketh/aws-health-mcp-server.git
+git clone https://github.com/aws-samples/sample-health-mcp-server.git
 cd aws-health-mcp-server
 uv sync --extra dev
 uv run pytest tests/ -v
