@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT-0"
 authors = [
-    {name = "AWS Health MCP Team", email = "support@example.com"}
+    {name = "AWS Health MCP Team", email = "jsanketh@amazon.com"}
 ]
 keywords = ["aws", "health", "mcp", "monitoring", "observability"]
 classifiers = [

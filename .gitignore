@@ -75,4 +75,3 @@ dmypy.json
 # Local configuration
 .env.local
 config.local.json
-fix_types.py
