@@ -1,12 +1,12 @@
 """AWS Health API client with lazy initialization."""
 
-import time
 import logging
-from typing import Tuple, Optional, Any
+import time
+from typing import Any, Optional, Tuple
 
 import boto3
-from botocore.exceptions import ClientError
 from botocore.config import Config as BotocoreConfig
+from botocore.exceptions import ClientError
 
 from .config import Config
 

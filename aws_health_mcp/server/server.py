@@ -9,11 +9,11 @@ from .client import health_client
 from .consts import VALID_AWS_SERVICES
 from .formatters import format_timestamp, get_event_description, validate_service_name
 from .org_tools import (
-    get_org_service_health,
-    get_org_affected_entities,
-    get_org_service_events,
     get_org_account_events,
+    get_org_affected_entities,
     get_org_scheduled_changes,
+    get_org_service_events,
+    get_org_service_health,
 )
 
 # Initialize FastMCP server

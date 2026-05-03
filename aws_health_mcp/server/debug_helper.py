@@ -143,6 +143,7 @@ def health_check() -> Dict[str, Any]:
 
         # Check Health API access
         import boto3
+
         from .client import health_client
 
         has_access, error_msg = health_client.check_health_api_access()
