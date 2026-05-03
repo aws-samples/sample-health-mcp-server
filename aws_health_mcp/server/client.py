@@ -37,9 +37,7 @@ class HealthClient:
     def check_health_api_access(self) -> Tuple[bool, Optional[str]]:
         """Check if we have access to AWS Health API."""
         try:
-            self.client.describe_events(
-                filter={"eventStatusCodes": ["open"]}, maxResults=10
-            )
+            self.client.describe_events(filter={"eventStatusCodes": ["open"]}, maxResults=10)
             return True, None
         except ClientError as e:
             code = e.response["Error"]["Code"]
@@ -67,7 +65,10 @@ class HealthClient:
         except ClientError as e:
             code = e.response["Error"]["Code"]
             if code == "AccessDeniedException":
-                return False, "Insufficient permissions — ensure you're calling from the management account."
+                return (
+                    False,
+                    "Insufficient permissions — ensure you're calling from the management account.",
+                )
             return False, f"{code}: {e.response['Error']['Message']}"
         except Exception as e:
             return False, str(e)

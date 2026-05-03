@@ -12,24 +12,21 @@ from .config import Config
 def setup_logging(level: str = None) -> None:
     """Setup production logging configuration."""
     log_level = level or Config.LOG_LEVEL
-    
+
     # Configure root logger
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format=Config.LOG_FORMAT,
         handlers=[
             logging.StreamHandler(sys.stderr),
-            logging.FileHandler(
-                Config.get_config_dir() / "aws-health-mcp.log",
-                mode='a'
-            )
-        ]
+            logging.FileHandler(Config.get_config_dir() / "aws-health-mcp.log", mode="a"),
+        ],
     )
-    
+
     # Set boto3 logging to WARNING to reduce noise
-    logging.getLogger('boto3').setLevel(logging.WARNING)
-    logging.getLogger('botocore').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger("boto3").setLevel(logging.WARNING)
+    logging.getLogger("botocore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 def log_api_call(service: str, operation: str, params: Dict[str, Any] = None) -> None:
@@ -59,9 +56,9 @@ def format_debug_output(data: Any) -> str:
 
 def _sanitize_params(params: Dict[str, Any]) -> Dict[str, Any]:
     """Remove sensitive information from parameters."""
-    sensitive_keys = {'password', 'token', 'key', 'secret', 'credential'}
+    sensitive_keys = {"password", "token", "key", "secret", "credential"}
     sanitized = {}
-    
+
     for key, value in params.items():
         if any(sensitive in key.lower() for sensitive in sensitive_keys):
             sanitized[key] = "***REDACTED***"
@@ -69,7 +66,7 @@ def _sanitize_params(params: Dict[str, Any]) -> Dict[str, Any]:
             sanitized[key] = _sanitize_params(value)
         else:
             sanitized[key] = value
-    
+
     return sanitized
 
 
@@ -105,16 +102,16 @@ def validate_aws_credentials() -> bool:
 
         session = boto3.Session(profile_name=Config.AWS_PROFILE)
         credentials = session.get_credentials()
-        
+
         if credentials is None:
             return False
-            
+
         # Test credentials by making a simple call
-        sts = session.client('sts')
+        sts = session.client("sts")
         sts.get_caller_identity()
-        
+
         return True
-        
+
     except (NoCredentialsError, PartialCredentialsError) as e:
         logger = logging.getLogger(__name__)
         logger.error(f"AWS credentials validation failed: {e}")
@@ -127,18 +124,15 @@ def validate_aws_credentials() -> bool:
 
 class HealthCheckError(Exception):
     """Custom exception for health check failures."""
+
     pass
 
 
 def health_check() -> Dict[str, Any]:
     """Perform comprehensive health check."""
     logger = logging.getLogger(__name__)
-    health_status = {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "checks": {}
-    }
-    
+    health_status = {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "checks": {}}
+
     try:
         # Check AWS credentials
         if validate_aws_credentials():
@@ -146,28 +140,28 @@ def health_check() -> Dict[str, Any]:
         else:
             health_status["checks"]["aws_credentials"] = "failed"
             health_status["status"] = "unhealthy"
-        
+
         # Check Health API access
         import boto3
         from .client import health_client
-        
+
         has_access, error_msg = health_client.check_health_api_access()
         if has_access:
             health_status["checks"]["health_api"] = "ok"
         else:
             health_status["checks"]["health_api"] = f"failed: {error_msg}"
             health_status["status"] = "degraded"
-        
+
         # Check configuration
         if Config.validate():
             health_status["checks"]["configuration"] = "ok"
         else:
             health_status["checks"]["configuration"] = "failed"
             health_status["status"] = "unhealthy"
-            
+
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         health_status["status"] = "unhealthy"
         health_status["error"] = str(e)
-    
+
     return health_status

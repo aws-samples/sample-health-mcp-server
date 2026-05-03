@@ -39,8 +39,8 @@ async def get_org_service_health() -> str:
 
         # Get events with pagination
         events = []
-        paginator = health_client.client.get_paginator('describe_events_for_organization')
-        
+        paginator = health_client.client.get_paginator("describe_events_for_organization")
+
         for page in paginator.paginate(filter={"eventStatusCodes": ["open", "upcoming"]}):
             if "events" in page:
                 events.extend(page["events"])
@@ -57,24 +57,31 @@ async def get_org_service_health() -> str:
             event_type = event.get("eventTypeCode", "Unknown")
             status_val = event.get("statusCode", "Unknown").upper()
             region = event.get("region", "global")
-            
+
             # Get affected accounts with pagination if available
             try:
                 affected_accounts = []
-                if hasattr(health_client.client, 'get_paginator') and hasattr(health_client.client.get_paginator, 'describe_affected_accounts_for_organization'):
-                    accounts_paginator = health_client.client.get_paginator('describe_affected_accounts_for_organization')
+                if hasattr(health_client.client, "get_paginator") and hasattr(
+                    health_client.client.get_paginator,
+                    "describe_affected_accounts_for_organization",
+                ):
+                    accounts_paginator = health_client.client.get_paginator(
+                        "describe_affected_accounts_for_organization"
+                    )
                     for accounts_page in accounts_paginator.paginate(eventArn=event["arn"]):
                         if "affectedAccounts" in accounts_page:
                             affected_accounts.extend(accounts_page["affectedAccounts"])
                 else:
                     # Fall back to non-paginated call
-                    affected_accounts_response = health_client.client.describe_affected_accounts_for_organization(
-                        eventArn=event["arn"]
+                    affected_accounts_response = (
+                        health_client.client.describe_affected_accounts_for_organization(
+                            eventArn=event["arn"]
+                        )
                     )
                     affected_accounts = affected_accounts_response.get("affectedAccounts", [])
             except Exception:
                 affected_accounts = []
-                
+
             event_details = f"""{'='*50}
 🏢 Org Event Details {'='*35}
 Service:     {service_name}
@@ -132,7 +139,7 @@ async def get_org_affected_entities(account_id: str = None, event_arn: str = Non
 
         # Get events with pagination
         events = []
-        
+
         if event_arn:
             # If event ARN is provided, only get that specific event
             try:
@@ -149,7 +156,7 @@ async def get_org_affected_entities(account_id: str = None, event_arn: str = Non
                 return f"AWS Organizations Health API error: {error_code} - {error_message}"
         else:
             # Otherwise get all open events
-            paginator = health_client.client.get_paginator('describe_events_for_organization')
+            paginator = health_client.client.get_paginator("describe_events_for_organization")
             for page in paginator.paginate(filter={"eventStatusCodes": ["open"]}):
                 if "events" in page:
                     events.extend(page["events"])
@@ -169,11 +176,13 @@ async def get_org_affected_entities(account_id: str = None, event_arn: str = Non
             # First get affected accounts
             try:
                 affected_accounts = []
-                accounts_response = health_client.client.describe_affected_accounts_for_organization(
-                    eventArn=event_arn
+                accounts_response = (
+                    health_client.client.describe_affected_accounts_for_organization(
+                        eventArn=event_arn
+                    )
                 )
                 affected_accounts = accounts_response.get("affectedAccounts", [])
-                
+
                 # Filter by account_id if provided
                 if account_id:
                     if account_id not in affected_accounts:
@@ -208,13 +217,15 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                 try:
                     # Get affected entities with pagination
                     entities = []
-                    entities_paginator = health_client.client.get_paginator('describe_affected_entities_for_organization')
+                    entities_paginator = health_client.client.get_paginator(
+                        "describe_affected_entities_for_organization"
+                    )
                     for entities_page in entities_paginator.paginate(
                         organizationEntityFilters=[{"eventArn": event_arn, "awsAccountId": acc}]
                     ):
                         if "entities" in entities_page:
                             entities.extend(entities_page["entities"])
-                    
+
                     if entities:
                         account_entities[acc] = entities
                 except ClientError:
@@ -227,11 +238,13 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     status_count[status] = status_count.get(status, 0) + 1
-                
+
                 event_details += f"\n🔹 Account: {acc}\n"
                 event_details += f"📊 Status Summary:\n"
-                event_details += "\n".join(f"- {status}: {count} entities" for status, count in status_count.items())
-                
+                event_details += "\n".join(
+                    f"- {status}: {count} entities" for status, count in status_count.items()
+                )
+
                 # Group entities by status
                 entities_by_status = {}
                 for entity in entities:
@@ -239,7 +252,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                     if status not in entities_by_status:
                         entities_by_status[status] = []
                     entities_by_status[status].append(entity)
-                
+
                 # Add entities grouped by status
                 for status, status_entities in entities_by_status.items():
                     event_details += f"\n\n{status.upper()} ({len(status_entities)}):"
@@ -249,7 +262,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                         if last_updated:
                             entity_details += f" (Last updated: {format_timestamp(last_updated)})"
                         event_details += f"\n- {entity_details}"
-                    
+
                     if len(status_entities) > 20:
                         event_details += f"\n... and {len(status_entities) - 20} more entities"
 
@@ -307,14 +320,14 @@ async def get_org_service_events(service: str) -> str:
         try:
             # Get events with pagination
             events = []
-            paginator = health_client.client.get_paginator('describe_events_for_organization')
-            
+            paginator = health_client.client.get_paginator("describe_events_for_organization")
+
             for page in paginator.paginate(
                 filter={"eventStatusCodes": ["open", "upcoming"], "services": [normalized_service]}
             ):
                 if "events" in page:
                     events.extend(page["events"])
-                    
+
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             error_message = e.response["Error"]["Message"]
@@ -328,16 +341,18 @@ async def get_org_service_events(service: str) -> str:
         for event in events:
             start_time = event.get("startTime", None)
             end_time = event.get("endTime", None)
-            
+
             # Get affected accounts
             try:
-                affected_accounts_response = health_client.client.describe_affected_accounts_for_organization(
-                    eventArn=event["arn"]
+                affected_accounts_response = (
+                    health_client.client.describe_affected_accounts_for_organization(
+                        eventArn=event["arn"]
+                    )
                 )
                 affected_accounts = affected_accounts_response.get("affectedAccounts", [])
             except Exception:
                 affected_accounts = []
-                
+
             event_details = f"""{'='*50}
 📅 Organization Event Details for {normalized_service} {'='*20}
 Event Type:  {event.get('eventTypeCode', 'Unknown')}
@@ -403,8 +418,8 @@ async def get_org_account_events(account_id: str) -> str:
 
         # Get all events with pagination
         all_events = []
-        paginator = health_client.client.get_paginator('describe_events_for_organization')
-        
+        paginator = health_client.client.get_paginator("describe_events_for_organization")
+
         for page in paginator.paginate(filter={"eventStatusCodes": ["open", "upcoming"]}):
             if "events" in page:
                 all_events.extend(page["events"])
@@ -416,11 +431,13 @@ async def get_org_account_events(account_id: str) -> str:
         account_events = []
         for event in all_events:
             try:
-                affected_accounts_response = health_client.client.describe_affected_accounts_for_organization(
-                    eventArn=event["arn"]
+                affected_accounts_response = (
+                    health_client.client.describe_affected_accounts_for_organization(
+                        eventArn=event["arn"]
+                    )
                 )
                 affected_accounts = affected_accounts_response.get("affectedAccounts", [])
-                
+
                 if account_id in affected_accounts:
                     account_events.append((event, affected_accounts))
             except Exception:
@@ -435,19 +452,23 @@ async def get_org_account_events(account_id: str) -> str:
             start_time = event.get("startTime", None)
             end_time = event.get("endTime", None)
             service_name = event.get("service", "Unknown")
-            
+
             # Get affected entities for this account and event
             try:
                 entities = []
-                entities_paginator = health_client.client.get_paginator('describe_affected_entities_for_organization')
+                entities_paginator = health_client.client.get_paginator(
+                    "describe_affected_entities_for_organization"
+                )
                 for entities_page in entities_paginator.paginate(
-                    organizationEntityFilters=[{"eventArn": event["arn"], "awsAccountId": account_id}]
+                    organizationEntityFilters=[
+                        {"eventArn": event["arn"], "awsAccountId": account_id}
+                    ]
                 ):
                     if "entities" in entities_page:
                         entities.extend(entities_page["entities"])
             except Exception:
                 entities = []
-                
+
             event_details = f"""{'='*50}
 📅 Event Details for Account {account_id} {'='*25}
 Service:     {service_name}
@@ -471,10 +492,12 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     status_count[status] = status_count.get(status, 0) + 1
-                
+
                 event_details += f"\n📊 Affected Resources Summary:\n"
-                event_details += "\n".join(f"- {status}: {count} resources" for status, count in status_count.items())
-                
+                event_details += "\n".join(
+                    f"- {status}: {count} resources" for status, count in status_count.items()
+                )
+
                 # Group entities by status
                 entities_by_status = {}
                 for entity in entities:
@@ -482,7 +505,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                     if status not in entities_by_status:
                         entities_by_status[status] = []
                     entities_by_status[status].append(entity)
-                
+
                 # Add entities grouped by status
                 for status, status_entities in entities_by_status.items():
                     event_details += f"\n\n{status.upper()} ({len(status_entities)}):"
@@ -492,7 +515,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                         if last_updated:
                             entity_details += f" (Last updated: {format_timestamp(last_updated)})"
                         event_details += f"\n- {entity_details}"
-                    
+
                     if len(status_entities) > 15:
                         event_details += f"\n... and {len(status_entities) - 15} more resources"
             else:
@@ -537,8 +560,8 @@ async def get_org_scheduled_changes() -> str:
 
         # Get events with pagination
         events = []
-        paginator = health_client.client.get_paginator('describe_events_for_organization')
-        
+        paginator = health_client.client.get_paginator("describe_events_for_organization")
+
         for page in paginator.paginate(
             filter={
                 "eventTypeCategories": ["scheduledChange"],
@@ -571,11 +594,13 @@ Total scheduled events: {len(service_events_list)}
                 start_time = event.get("startTime", None)
                 end_time = event.get("endTime", None)
                 last_updated = event.get("lastUpdatedTime", None)
-                
+
                 # Get affected accounts
                 try:
-                    affected_accounts_response = health_client.client.describe_affected_accounts_for_organization(
-                        eventArn=event["arn"]
+                    affected_accounts_response = (
+                        health_client.client.describe_affected_accounts_for_organization(
+                            eventArn=event["arn"]
+                        )
                     )
                     affected_accounts = affected_accounts_response.get("affectedAccounts", [])
                 except Exception:

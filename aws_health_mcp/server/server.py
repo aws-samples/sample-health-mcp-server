@@ -44,8 +44,8 @@ async def get_service_health() -> str:
     try:
         # Get current health events with pagination
         events = []
-        paginator = health_client.client.get_paginator('describe_events')
-        
+        paginator = health_client.client.get_paginator("describe_events")
+
         # Include both open and upcoming events
         for page in paginator.paginate(filter={"eventStatusCodes": ["open", "upcoming"]}):
             if "events" in page:
@@ -103,8 +103,8 @@ async def get_affected_entities() -> str:
     try:
         # First get all open events with pagination
         events = []
-        paginator = health_client.client.get_paginator('describe_events')
-        
+        paginator = health_client.client.get_paginator("describe_events")
+
         for page in paginator.paginate(filter={"eventStatusCodes": ["open"]}):
             if "events" in page:
                 events.extend(page["events"])
@@ -123,8 +123,8 @@ async def get_affected_entities() -> str:
 
             # Get affected entities for this event with pagination
             entities = []
-            entities_paginator = health_client.client.get_paginator('describe_affected_entities')
-            
+            entities_paginator = health_client.client.get_paginator("describe_affected_entities")
+
             for entities_page in entities_paginator.paginate(filter={"eventArns": [event_arn]}):
                 if "entities" in entities_page:
                     entities.extend(entities_page["entities"])
@@ -224,14 +224,14 @@ async def get_service_events(service: str) -> str:
         try:
             # Get events with pagination
             events = []
-            paginator = health_client.client.get_paginator('describe_events')
-            
+            paginator = health_client.client.get_paginator("describe_events")
+
             for page in paginator.paginate(
                 filter={"eventStatusCodes": ["open", "upcoming"], "services": [normalized_service]}
             ):
                 if "events" in page:
                     events.extend(page["events"])
-                    
+
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             error_message = e.response["Error"]["Message"]
@@ -316,12 +316,12 @@ async def get_completed_events(service: str = None) -> str:
         try:
             # Get events with pagination
             events = []
-            paginator = health_client.client.get_paginator('describe_events')
-            
+            paginator = health_client.client.get_paginator("describe_events")
+
             for page in paginator.paginate(filter=filter_params):
                 if "events" in page:
                     events.extend(page["events"])
-                    
+
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             error_message = e.response["Error"]["Message"]
@@ -390,8 +390,8 @@ async def get_scheduled_changes() -> str:
     try:
         # Get events with pagination
         events = []
-        paginator = health_client.client.get_paginator('describe_events')
-        
+        paginator = health_client.client.get_paginator("describe_events")
+
         for page in paginator.paginate(
             filter={
                 "eventTypeCategories": ["scheduledChange"],
@@ -479,15 +479,17 @@ async def get_org_health_events(
         if service is None and account_id is None and (status is None or status == "active"):
             # Get events with pagination
             events = []
-            paginator = health_client.client.get_paginator('describe_events_for_organization')
-            
-            for page in paginator.paginate(filter={"eventStatusCodes": ["open", "upcoming", "closed"]}):
+            paginator = health_client.client.get_paginator("describe_events_for_organization")
+
+            for page in paginator.paginate(
+                filter={"eventStatusCodes": ["open", "upcoming", "closed"]}
+            ):
                 if "events" in page:
                     events.extend(page["events"])
-                    
+
             if not events:
                 return "No active AWS organization health events found."
-                
+
             formatted_events = []
             for event in events:
                 start_time = event.get("startTime", None)
@@ -522,7 +524,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
 {'='*50}"""
                 formatted_events.append(event_details)
             return "\n\n".join(formatted_events)
-            
+
         # Otherwise, keep the original filtering logic
         if status is None:
             status = "active"
@@ -532,7 +534,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
             status_codes = ["closed"]
         else:
             return "Invalid status. Please use 'active' or 'closed'."
-            
+
         filter_params = {"eventStatusCodes": status_codes}
         normalized_service = None
         if service:
@@ -542,26 +544,26 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                 valid_examples = ", ".join(VALID_AWS_SERVICES[:5])
                 return f"Invalid service name: {service}.{suggestion}\nPlease provide a valid AWS service name (e.g., {valid_examples})."
             filter_params["services"] = [normalized_service]
-            
+
         try:
             # Get events with pagination
             events = []
-            paginator = health_client.client.get_paginator('describe_events_for_organization')
-            
+            paginator = health_client.client.get_paginator("describe_events_for_organization")
+
             for page in paginator.paginate(filter=filter_params):
                 if "events" in page:
                     events.extend(page["events"])
-                    
+
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             error_message = e.response["Error"]["Message"]
             return f"AWS Organizations Health API error: {error_code} - {error_message}"
-            
+
         if not events:
             service_msg = f" for service: {normalized_service}" if service else ""
             status_msg = f" with status '{status}'"
             return f"No organization health events found{status_msg}{service_msg}."
-            
+
         formatted_events = []
         for event in events:
             event_arn = event["arn"]
@@ -574,10 +576,10 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                 affected_accounts = affected_accounts_response.get("affectedAccounts", [])
             except ClientError:
                 affected_accounts = []
-                
+
             if account_id and account_id not in affected_accounts:
                 continue
-                
+
             service_name = event.get("service", "Unknown")
             start_time = event.get("startTime", None)
             end_time = event.get("endTime", None)
@@ -603,15 +605,15 @@ Last Updated: {format_timestamp(last_updated) if last_updated else 'Not specifie
 - Event Scope:    {event.get('eventScopeCode', 'Not specified')}
 {'='*50}"""
             formatted_events.append(event_details)
-            
+
         if not formatted_events:
             account_msg = f" for account {account_id}" if account_id else ""
             service_msg = f" and service {normalized_service}" if service else ""
             status_msg = f" with status '{status}'"
             return f"No matching organization health events found{account_msg}{status_msg}{service_msg}."
-            
+
         return "\n\n".join(formatted_events)
-        
+
     except Exception as e:
         return f"Error fetching organization health events: {str(e)}\nPlease ensure you have proper AWS credentials and Organizations access."
 

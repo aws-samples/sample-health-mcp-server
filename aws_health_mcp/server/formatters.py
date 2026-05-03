@@ -76,7 +76,7 @@ def get_event_description(event: dict, health_client) -> str:
         # Call describe_event_details with retry logic
         max_retries = 3
         retry_delay = 1  # seconds
-        
+
         for attempt in range(max_retries):
             try:
                 response = health_client.describe_event_details(eventArns=[event_arn])
@@ -84,18 +84,23 @@ def get_event_description(event: dict, health_client) -> str:
             except ClientError as e:
                 error_code = e.response["Error"]["Code"]
                 error_message = e.response["Error"]["Message"]
-                
+
                 # If this is a throttling error and not the last attempt, retry
-                if error_code in ["Throttling", "ThrottlingException", "RequestLimitExceeded"] and attempt < max_retries - 1:
+                if (
+                    error_code in ["Throttling", "ThrottlingException", "RequestLimitExceeded"]
+                    and attempt < max_retries - 1
+                ):
                     import time
-                    time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+
+                    time.sleep(retry_delay * (2**attempt))  # Exponential backoff
                     continue
-                    
+
                 return f"Error getting detailed description: {error_code} - {error_message}"
             except Exception as e:
                 if attempt < max_retries - 1:
                     import time
-                    time.sleep(retry_delay * (2 ** attempt))
+
+                    time.sleep(retry_delay * (2**attempt))
                     continue
                 return f"Error retrieving description: {str(e)}"
 
