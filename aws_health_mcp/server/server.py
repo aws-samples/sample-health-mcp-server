@@ -131,7 +131,7 @@ async def get_affected_entities() -> str:
 
             if entities:
                 # Count entities by status
-                status_count = {}
+                status_count: dict[str, int] = {}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     status_count[status] = status_count.get(status, 0) + 1
@@ -155,7 +155,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
 🎯 Affected Entities:"""
 
                 # Group entities by status
-                entities_by_status = {}
+                entities_by_status: dict[str, list] = {}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     if status not in entities_by_status:
@@ -270,7 +270,7 @@ Event ARN:   {event.get('arn', 'Not available')}
 
 
 @mcp.tool()
-async def get_completed_events(service: str = None) -> str:
+async def get_completed_events(service: str | None = None) -> str:
     """Get completed/closed health events.
 
     This tool provides historical information about resolved AWS health events.
@@ -405,7 +405,7 @@ async def get_scheduled_changes() -> str:
             return "No scheduled changes found."
 
         # Group events by service
-        service_events = {}
+        service_events: dict[str, list] = {}
         for event in events:
             service = event.get("service", "Unknown")
             if service not in service_events:
@@ -448,7 +448,7 @@ Last Updated: {format_timestamp(last_updated) if last_updated else 'Not specifie
 
 @mcp.tool()
 async def get_org_health_events(
-    service: str = None, account_id: str = None, status: str = "active"
+    service: str | None = None, account_id: str | None = None, status: str = "active"
 ) -> str:
     """Get health events across your AWS Organization.
 

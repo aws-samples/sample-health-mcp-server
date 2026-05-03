@@ -9,7 +9,7 @@ from typing import Any, Dict
 from .config import Config
 
 
-def setup_logging(level: str = None) -> None:
+def setup_logging(level: str | None = None) -> None:
     """Setup production logging configuration."""
     log_level = level or Config.LOG_LEVEL
 
@@ -29,7 +29,7 @@ def setup_logging(level: str = None) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
-def log_api_call(service: str, operation: str, params: Dict[str, Any] = None) -> None:
+def log_api_call(service: str, operation: str, params: Dict[str, Any] | None = None) -> None:
     """Log AWS API calls for debugging."""
     logger = logging.getLogger(__name__)
     logger.debug(f"AWS API Call - Service: {service}, Operation: {operation}")
@@ -57,7 +57,7 @@ def format_debug_output(data: Any) -> str:
 def _sanitize_params(params: Dict[str, Any]) -> Dict[str, Any]:
     """Remove sensitive information from parameters."""
     sensitive_keys = {"password", "token", "key", "secret", "credential"}
-    sanitized = {}
+    sanitized: Dict[str, Any] = {}
 
     for key, value in params.items():
         if any(sensitive in key.lower() for sensitive in sensitive_keys):
@@ -131,7 +131,11 @@ class HealthCheckError(Exception):
 def health_check() -> Dict[str, Any]:
     """Perform comprehensive health check."""
     logger = logging.getLogger(__name__)
-    health_status = {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "checks": {}}
+    health_status: Dict[str, Any] = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": {},
+    }
 
     try:
         # Check AWS credentials

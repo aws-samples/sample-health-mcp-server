@@ -106,7 +106,9 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
         return f"Error fetching organization health events: {str(e)}\nPlease ensure you have proper AWS credentials and Organizations access."
 
 
-async def get_org_affected_entities(account_id: str = None, event_arn: str = None) -> str:
+async def get_org_affected_entities(
+    account_id: str | None = None, event_arn: str | None = None
+) -> str:
     """Get affected entities for AWS health events across your organization.
 
     This tool provides detailed information about resources affected by health events
@@ -234,7 +236,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
             # Add entities grouped by account
             for acc, entities in account_entities.items():
                 # Count entities by status
-                status_count = {}
+                status_count: dict[str, int] = {}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     status_count[status] = status_count.get(status, 0) + 1
@@ -246,7 +248,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                 )
 
                 # Group entities by status
-                entities_by_status = {}
+                entities_by_status: dict[str, list] = {}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     if status not in entities_by_status:
@@ -488,7 +490,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
             # Add affected entities if available
             if entities:
                 # Count entities by status
-                status_count = {}
+                status_count: dict[str, int] = {}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     status_count[status] = status_count.get(status, 0) + 1
@@ -499,7 +501,7 @@ End Time:    {format_timestamp(end_time) if end_time else 'Not specified'}
                 )
 
                 # Group entities by status
-                entities_by_status = {}
+                entities_by_status: dict[str, list] = {}
                 for entity in entities:
                     status = entity.get("statusCode", "Unknown")
                     if status not in entities_by_status:
@@ -575,7 +577,7 @@ async def get_org_scheduled_changes() -> str:
             return "No scheduled changes found across your organization."
 
         # Group events by service
-        service_events = {}
+        service_events: dict[str, list] = {}
         for event in events:
             service = event.get("service", "Unknown")
             if service not in service_events:
