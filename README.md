@@ -2,7 +2,7 @@
 
 > **Disclaimer:** This AWS content is provided subject to the terms of the AWS Customer Agreement available at https://aws.amazon.com/agreement or other written agreement between the Customer and Amazon Web Services. This is sample code for demonstration purposes only. It is not intended for production use. You should work with your security and legal teams to meet your organizational security, regulatory, and compliance requirements before any deployment.
 
-MCP server that exposes AWS Health API as tools. Works with Claude Desktop, Kiro, Amazon Q CLI, or any MCP-compatible client.
+MCP server that exposes AWS Health API as tools. Works with Claude Desktop, Kiro or any MCP-compatible client.
 
 ## Prerequisites
 
