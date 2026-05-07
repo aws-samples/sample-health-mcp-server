@@ -4,6 +4,9 @@
 
 MCP server that exposes AWS Health API as tools. Works with Claude Desktop, Kiro or any MCP-compatible client.
 
+📖 **Blog:** [Building an AWS Health MCP Server for Agentic Operations](https://medium.com/@jsanketh1799/building-an-aws-health-mcp-server-for-agentic-operations-cda234012e38)
+
+
 ## Prerequisites
 
 - Python 3.10+
