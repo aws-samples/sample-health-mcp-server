@@ -128,7 +128,7 @@ class HealthCheckError(Exception):
     pass
 
 
-def health_check() -> Dict[str, Any]:
+async def health_check() -> Dict[str, Any]:
     """Perform comprehensive health check."""
     logger = logging.getLogger(__name__)
     health_status: Dict[str, Any] = {
@@ -146,11 +146,9 @@ def health_check() -> Dict[str, Any]:
             health_status["status"] = "unhealthy"
 
         # Check Health API access
-        import boto3
-
         from .client import health_client
 
-        has_access, error_msg = health_client.check_health_api_access()
+        has_access, error_msg = await health_client.check_health_api_access()
         if has_access:
             health_status["checks"]["health_api"] = "ok"
         else:

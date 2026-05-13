@@ -20,7 +20,6 @@ class Config:
 
     # Health API Configuration
     HEALTH_API_TIMEOUT: int = int(os.getenv("HEALTH_API_TIMEOUT", "30"))
-    MAX_EVENTS_PER_REQUEST: int = int(os.getenv("MAX_EVENTS_PER_REQUEST", "100"))
 
     # Cache Configuration
     CACHE_TTL: int = int(os.getenv("CACHE_TTL", "300"))  # 5 minutes
@@ -28,7 +27,7 @@ class Config:
 
     # Server Configuration
     SERVER_NAME: str = os.getenv("SERVER_NAME", "aws-health")
-    SERVER_VERSION: str = "1.0.0"
+    SERVER_VERSION: str = "2.0.0"
 
     @classmethod
     def get_config_dir(cls) -> Path:
@@ -44,9 +43,6 @@ class Config:
             # Validate timeout values
             if cls.HEALTH_API_TIMEOUT <= 0:
                 raise ValueError("HEALTH_API_TIMEOUT must be positive")
-
-            if cls.MAX_EVENTS_PER_REQUEST <= 0:
-                raise ValueError("MAX_EVENTS_PER_REQUEST must be positive")
 
             if cls.CACHE_TTL < 0:
                 raise ValueError("CACHE_TTL must be non-negative")

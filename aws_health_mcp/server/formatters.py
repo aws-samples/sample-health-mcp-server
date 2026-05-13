@@ -1,33 +1,25 @@
 """Formatting utilities for AWS Health events and data."""
 
+import asyncio
 import difflib
-from datetime import datetime
-
-from botocore.exceptions import ClientError
+from typing import TYPE_CHECKING
 
 from .consts import VALID_AWS_SERVICES
 
+if TYPE_CHECKING:
+    from .client import HealthClient
+
 
 def validate_service_name(service: str) -> tuple[bool, str]:
-    """Validate and normalize AWS service name.
-
-    Args:
-        service: The service name to validate
-
-    Returns:
-        Tuple of (is_valid, normalized_name)
-    """
+    """Validate and normalize AWS service name."""
     if not service:
         return False, ""
 
-    # Normalize input: remove spaces, convert to uppercase
     normalized = service.replace(" ", "").replace("-", "_").upper()
 
-    # Direct match
     if normalized in VALID_AWS_SERVICES:
         return True, normalized
 
-    # Check for common variations
     service_mappings = {
         "ELASTIC_BEANSTALK": "ELASTICBEANSTALK",
         "ELASTIC_LOAD_BALANCING": "ELASTICLOADBALANCING",
@@ -42,7 +34,6 @@ def validate_service_name(service: str) -> tuple[bool, str]:
     if normalized in service_mappings:
         return True, service_mappings[normalized]
 
-    # Find closest match for suggestion
     matches = difflib.get_close_matches(normalized, VALID_AWS_SERVICES, n=1, cutoff=0.6)
     if matches:
         return False, matches[0]
@@ -57,89 +48,88 @@ def format_timestamp(timestamp) -> str:
     return timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def get_event_description(event: dict, health_client) -> str:
-    """Extract and format the event description using describe_event_details.
+def format_event(event: dict, description: str, affected_accounts: list[str] | None = None) -> str:
+    """Format a single health event into markdown."""
+    start_time = event.get("startTime")
+    end_time = event.get("endTime")
+    last_updated = event.get("lastUpdatedTime")
+    service = event.get("service", "Unknown")
+    status = event.get("statusCode", "unknown").upper()
+    region = event.get("region", "global")
 
-    Args:
-        event: The event dictionary containing at least the ARN
-        health_client: The AWS Health client instance
+    lines = [
+        f"## {service} — {event.get('eventTypeCode', 'Unknown')}",
+        "",
+        f"| Field | Value |",
+        f"|-------|-------|",
+        f"| Status | {status} |",
+        f"| Region | {region} |",
+        f"| Start | {format_timestamp(start_time)} |",
+        f"| End | {format_timestamp(end_time)} |",
+    ]
 
-    Returns:
-        A formatted description string
-    """
-    try:
-        # Get the event ARN
-        event_arn = event.get("arn")
-        if not event_arn:
-            return "Description: Event ARN not available"
+    if last_updated:
+        lines.append(f"| Last Updated | {format_timestamp(last_updated)} |")
 
-        # Call describe_event_details with retry logic
-        max_retries = 3
-        retry_delay = 1  # seconds
+    category = event.get("eventTypeCategory")
+    if category:
+        lines.append(f"| Category | {category} |")
 
-        for attempt in range(max_retries):
-            try:
-                response = health_client.describe_event_details(eventArns=[event_arn])
-                break  # Success, exit retry loop
-            except ClientError as e:
-                error_code = e.response["Error"]["Code"]
-                error_message = e.response["Error"]["Message"]
+    scope = event.get("eventScopeCode")
+    if scope:
+        lines.append(f"| Scope | {scope} |")
 
-                # If this is a throttling error and not the last attempt, retry
-                if (
-                    error_code in ["Throttling", "ThrottlingException", "RequestLimitExceeded"]
-                    and attempt < max_retries - 1
-                ):
-                    import time
+    lines.append("")
+    lines.append(description)
 
-                    time.sleep(retry_delay * (2**attempt))  # Exponential backoff
-                    continue
+    if affected_accounts is not None:
+        lines.append("")
+        lines.append(f"**Affected Accounts ({len(affected_accounts)}):**")
+        if affected_accounts:
+            for acc in affected_accounts[:20]:
+                lines.append(f"- {acc}")
+            if len(affected_accounts) > 20:
+                lines.append(f"- ... and {len(affected_accounts) - 20} more")
+        else:
+            lines.append("- None")
 
-                return f"Error getting detailed description: {error_code} - {error_message}"
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    import time
+    return "\n".join(lines)
 
-                    time.sleep(retry_delay * (2**attempt))
-                    continue
-                return f"Error retrieving description: {str(e)}"
 
-        # Extract description from response
-        if not response or "successfulSet" not in response or not response["successfulSet"]:
-            # Fall back to basic description if detailed call fails
-            if "eventDescription" not in event:
-                return "Description: Not provided by AWS"
+def format_entity(entity: dict) -> str:
+    """Format a single affected entity."""
+    value = entity.get("entityValue", "Unknown")
+    last_updated = entity.get("lastUpdatedTime")
+    suffix = f" (updated: {format_timestamp(last_updated)})" if last_updated else ""
+    return f"- {value}{suffix}"
 
-            descriptions = event["eventDescription"]
-            if not descriptions or not isinstance(descriptions, list):
-                return "Description: Invalid description format"
 
-            # Get the English description or the first available one
-            for desc in descriptions:
-                if desc.get("language", "") == "en-US":
-                    return desc.get("latestDescription", "No English description available")
+async def format_events_batch(
+    events: list[dict], client: "HealthClient", include_accounts: bool = False
+) -> str:
+    """Format a batch of events, fetching descriptions in batched API calls."""
+    if not events:
+        return "No events found."
 
-            # If no English description found, use the first one
-            if descriptions:
-                return descriptions[0].get(
-                    "latestDescription", "Description not available in any language"
-                )
+    arns = [e.get("arn", "") for e in events]
+    valid_arns = [a for a in arns if a]
 
-            return "Description: Not available"
+    # Single batched call for all descriptions (10 ARNs per API call)
+    descriptions = await client.get_event_descriptions_batched(valid_arns)
 
-        # Get the successful event detail
-        event_detail = response["successfulSet"][0]
+    # Fetch accounts in parallel if needed
+    accounts_map: dict[str, list[str]] = {}
+    if include_accounts:
+        account_results = await asyncio.gather(
+            *[client.get_affected_accounts(arn) for arn in valid_arns]
+        )
+        accounts_map = dict(zip(valid_arns, account_results))
 
-        # Extract the detailed description
-        event_desc = event_detail.get("eventDescription", {})
-        latest_desc = event_desc.get("latestDescription", "")
+    formatted = []
+    for event in events:
+        arn = event.get("arn", "")
+        desc = descriptions.get(arn, "No description available")
+        accounts = accounts_map.get(arn) if include_accounts else None
+        formatted.append(format_event(event, desc, accounts))
 
-        # If we got a detailed description, return it
-        if latest_desc:
-            return latest_desc
-
-        # Fall back to basic description if detailed is empty
-        return "Description: No detailed description available"
-
-    except Exception as e:
-        return f"Error retrieving description: {str(e)}"
+    return "\n\n---\n\n".join(formatted)
