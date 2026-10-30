@@ -2,41 +2,75 @@
 
 import asyncio
 import difflib
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Iterable, Optional
 
-from .consts import VALID_AWS_SERVICES
+from .consts import SERVICE_ALIASES
 
 if TYPE_CHECKING:
     from .client import HealthClient
 
+# A suggestion is only worth showing if it is close enough to be a plausible
+# typo. The previous 0.6 produced actively misleading advice -- "CloudTrail"
+# was answered with "did you mean CLOUDFORMATION?" (ratio 0.58), a different
+# service entirely.
+_SUGGESTION_CUTOFF = 0.85
 
-def validate_service_name(service: str) -> tuple[bool, str]:
-    """Validate and normalize AWS service name."""
-    if not service:
+
+def compress_service_name(service: str) -> str:
+    """Reduce a service name to a canonical comparison key.
+
+    Uppercases and strips every non-alphanumeric character, so "Kinesis Video",
+    "kinesis-video" and "KINESIS_VIDEO" all collapse to "KINESISVIDEO". This is
+    collision-free across the AWS Health service codes.
+    """
+    return re.sub(r"[^A-Z0-9]", "", service.upper())
+
+
+def validate_service_name(
+    service: str, known_services: Optional[Iterable[str]] = None
+) -> tuple[bool, str]:
+    """Resolve a user-supplied service name to a real AWS Health service code.
+
+    Args:
+        service: The name as the caller typed it.
+        known_services: Authoritative service codes from ``DescribeEventTypes``.
+            When omitted (the API was unreachable) the name is normalized but
+            *accepted* rather than rejected -- letting AWS answer is better than
+            claiming a real service does not exist.
+
+    Returns:
+        ``(True, service_code)`` when resolved, otherwise ``(False, suggestion)``
+        where ``suggestion`` is a close real service code or ``""`` if there is
+        no plausible match.
+    """
+    if not service or not service.strip():
         return False, ""
 
-    normalized = service.replace(" ", "").replace("-", "_").upper()
+    compressed = compress_service_name(service)
+    if not compressed:
+        return False, ""
 
-    if normalized in VALID_AWS_SERVICES:
-        return True, normalized
+    if known_services is None:
+        # Offline/degraded mode: normalize what we can, then defer to the API.
+        return True, SERVICE_ALIASES.get(compressed, service.strip().upper())
 
-    service_mappings = {
-        "ELASTIC_BEANSTALK": "ELASTICBEANSTALK",
-        "ELASTIC_LOAD_BALANCING": "ELASTICLOADBALANCING",
-        "ELASTIC_LOAD_BALANCER": "ELASTICLOADBALANCING",
-        "ELB": "ELASTICLOADBALANCING",
-        "ELASTIC_CACHE": "ELASTICCACHE",
-        "ELASTIC_SEARCH": "ELASTICSEARCH",
-        "DYNAMO": "DYNAMODB",
-        "DYNAMO_DB": "DYNAMODB",
-    }
+    # Map each real code by its compressed form so spelling and separator
+    # differences resolve without needing an alias entry.
+    by_compressed = {compress_service_name(code): code for code in known_services}
 
-    if normalized in service_mappings:
-        return True, service_mappings[normalized]
+    aliased = SERVICE_ALIASES.get(compressed)
+    if aliased and compress_service_name(aliased) in by_compressed:
+        return True, by_compressed[compress_service_name(aliased)]
 
-    matches = difflib.get_close_matches(normalized, VALID_AWS_SERVICES, n=1, cutoff=0.6)
+    if compressed in by_compressed:
+        return True, by_compressed[compressed]
+
+    matches = difflib.get_close_matches(
+        compressed, list(by_compressed), n=1, cutoff=_SUGGESTION_CUTOFF
+    )
     if matches:
-        return False, matches[0]
+        return False, by_compressed[matches[0]]
 
     return False, ""
 

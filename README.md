@@ -64,42 +64,80 @@ That's it. `uv` handles the venv and dependencies automatically.
 
 ## Tools
 
+All tools are read-only and annotated as such. The Health API's two mutating
+operations (`EnableHealthServiceAccessForOrganization` and
+`DisableHealthServiceAccessForOrganization`) are deliberately not exposed.
+
+### Start here
+
+| Tool | Description |
+|------|-------------|
+| `summarize_health_events(group_by?, include_closed?)` | Event **counts** by service, status, category or region. Cheap overview — the listing tools include full descriptions and can be very large. |
+| `get_event_details(event_arns)` | Full detail for specific events, by ARN |
+| `find_events_for_resources(entity_values, include_closed?)` | Which events affect *your* resources, e.g. `i-1234567890abcdef0` |
+| `check_health_access()` | Diagnose credentials, support plan and org access |
+
 ### Account-Level
 
 | Tool | Description |
 |------|-------------|
-| `get_service_health` | All active health events |
+| `get_service_health(regions?)` | All active health events |
 | `get_affected_entities` | Resources impacted by open events |
-| `get_service_events(service)` | Events for a specific service (e.g., EC2, RDS) |
-| `get_completed_events(service?)` | Recently resolved events |
-| `get_scheduled_changes` | Upcoming maintenance |
+| `get_service_events(service, regions?)` | Events for a specific service (e.g., EC2, RDS) |
+| `get_completed_events(service?, regions?)` | Recently resolved events |
+| `get_scheduled_changes(regions?)` | Upcoming maintenance |
+| `count_affected_entities(event_arns)` | How many resources an event hits, without listing them |
 
 ### Organization-Level
 
 | Tool | Description |
 |------|-------------|
-| `get_org_health_events(service?, account_id?, status?)` | Events across all accounts |
+| `get_org_health_events(service?, account_id?, status?, regions?)` | Events across all accounts |
 | `get_org_service_health` | Active events org-wide |
 | `get_org_affected_entities(account_id?, event_arn?)` | Impacted resources across accounts |
-| `get_org_service_events(service)` | Service-specific events org-wide |
-| `get_org_account_events(account_id)` | Events for a specific account |
+| `get_org_service_events(service, regions?)` | Service-specific events org-wide |
+| `get_org_account_events(account_id, regions?)` | Events for a specific account |
 | `get_org_scheduled_changes` | Org-wide scheduled maintenance |
+| `list_affected_accounts(event_arn)` | Accounts affected by one event |
+
+### Discovery
+
+| Tool | Description |
+|------|-------------|
+| `list_event_types(service?, category?)` | Event types AWS Health reports, and the service codes it uses |
 
 ## Example Prompts
 
 - "Are there any active AWS health events?"
+- "Give me a summary of current AWS issues by service"
 - "What's happening with EC2 right now?"
+- "What's broken in us-west-2?"
+- "Is instance i-1234567890abcdef0 affected by anything?"
 - "Show me scheduled maintenance across my organization"
 - "What resources are affected by current issues in account 123456789012?"
+
+### Service names
+
+Pass service names however you like — `EC2`, `ec2`, `Step Functions`,
+`api gateway` all resolve. The valid set comes from the Health API itself, so
+every service AWS covers is reachable, and names are mapped to the codes AWS
+actually uses (Step Functions is `STATES`, EventBridge is `EVENTS`). Use
+`list_event_types` to browse them.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AWS_PROFILE` | none | AWS credentials profile |
-| `AWS_REGION` | `us-east-1` | Region (Health API is us-east-1 only) |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`) |
-| `HEALTH_API_TIMEOUT` | `30` | API timeout in seconds |
+| `HEALTH_API_TIMEOUT` | `30` | API read timeout in seconds |
+| `HEALTH_API_MAX_CONCURRENCY` | `5` | Max concurrent Health API calls |
+| `ENABLE_CACHE` | `true` | Cache event descriptions and affected accounts |
+| `CACHE_TTL` | `300` | Cache lifetime in seconds |
+| `SERVICE_LIST_TTL` | `86400` | Cache lifetime for the service catalog |
+
+The Health API is only available through `us-east-1`, so the region is fixed
+and not configurable.
 
 ## Troubleshooting
 

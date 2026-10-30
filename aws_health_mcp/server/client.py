@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 MAX_CONCURRENCY = int(os.getenv("HEALTH_API_MAX_CONCURRENCY", "5"))
 
+_SERVICES_CACHE_KEY = "known_services"
+
 
 class HealthClient:
     """AWS Health API client wrapper with lazy init, caching, and async support."""
@@ -40,14 +42,14 @@ class HealthClient:
             logger.info("AWS Health API client initialized")
         return self._client
 
-    def _cache_get(self, key: str):
+    def _cache_get(self, key: str, ttl: Optional[int] = None):
         if not Config.ENABLE_CACHE:
             return None
         entry = self._cache.get(key)
         if entry is None:
             return None
         ts, value = entry
-        if _time.time() - ts > Config.CACHE_TTL:
+        if _time.time() - ts > (Config.CACHE_TTL if ttl is None else ttl):
             del self._cache[key]
             return None
         return value
@@ -59,6 +61,7 @@ class HealthClient:
     async def paginate(self, operation: str, **kwargs) -> list:
         """Paginate a Health API operation off the event loop, with concurrency control."""
         async with self._semaphore:
+
             def _sync():
                 results = []
                 paginator = self.client.get_paginator(operation)
@@ -67,15 +70,59 @@ class HealthClient:
                     if key in page:
                         results.extend(page[key])
                 return results
+
             return await asyncio.to_thread(_sync)
 
     async def call(self, operation: str, **kwargs) -> dict:
         """Call a Health API operation off the event loop, with concurrency control."""
         async with self._semaphore:
+
             def _sync():
                 method = getattr(self.client, operation)
                 return method(**kwargs)
+
             return await asyncio.to_thread(_sync)
+
+    async def get_caller_identity(self) -> Optional[dict]:
+        """Return the calling identity via STS, or None if credentials are unusable."""
+
+        def _sync():
+            session = boto3.Session(profile_name=Config.AWS_PROFILE)
+            return session.client("sts").get_caller_identity()
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except Exception as e:
+            logger.warning("Could not resolve AWS caller identity: %s", e)
+            return None
+
+    async def get_known_services(self) -> Optional[list[str]]:
+        """Return every service code AWS Health knows about, or None if unavailable.
+
+        This is the authoritative replacement for a hardcoded service list. The
+        result changes rarely, so it is cached for ``Config.SERVICE_LIST_TTL``
+        (24h by default) rather than the short default TTL.
+
+        Returns None when the API cannot be reached, which callers should treat
+        as "cannot validate" rather than "no services exist".
+        """
+        cached = self._cache_get(_SERVICES_CACHE_KEY, ttl=Config.SERVICE_LIST_TTL)
+        if cached is not None:
+            return cached
+
+        try:
+            event_types = await self.paginate("describe_event_types")
+        except Exception as e:
+            logger.warning("Could not fetch AWS Health service list: %s", e)
+            return None
+
+        services = sorted({et["service"] for et in event_types if et.get("service")})
+        if not services:
+            return None
+
+        self._cache_set(_SERVICES_CACHE_KEY, services)
+        logger.debug("Loaded %d AWS Health service codes", len(services))
+        return services
 
     async def get_event_description(self, event_arn: str) -> str:
         """Get a single event description. Prefer get_event_descriptions_batched for multiple."""
@@ -109,8 +156,7 @@ class HealthClient:
             return result
 
         batches = [
-            uncached_arns[i : i + BATCH_SIZE]
-            for i in range(0, len(uncached_arns), BATCH_SIZE)
+            uncached_arns[i : i + BATCH_SIZE] for i in range(0, len(uncached_arns), BATCH_SIZE)
         ]
 
         failed_arns: list[str] = []
@@ -140,8 +186,7 @@ class HealthClient:
         remaining = [arn for arn in failed_arns if arn not in result]
         if remaining:
             org_batches = [
-                remaining[i : i + BATCH_SIZE]
-                for i in range(0, len(remaining), BATCH_SIZE)
+                remaining[i : i + BATCH_SIZE] for i in range(0, len(remaining), BATCH_SIZE)
             ]
 
             async def _fetch_org_batch(batch: list[str]) -> dict[str, str]:
@@ -228,6 +273,48 @@ class HealthClient:
         self._cache_set(cache_key, accounts)
         return accounts
 
+    async def find_entities_for_values(
+        self, event_arns: list[str], entity_values: list[str]
+    ) -> dict[str, list]:
+        """Find which of ``event_arns`` affect any of ``entity_values``.
+
+        DescribeAffectedEntities caps eventArns at 10 per call, so ARNs are
+        batched and the batches run concurrently under the semaphore.
+
+        The API's entityValues filter cannot be trusted on its own: PUBLIC-scope
+        events (e.g. AWS_MULTIPLE_SERVICES_OPERATIONAL_ISSUE) return a
+        placeholder entity with entityValue "UNKNOWN" whatever was asked for, so
+        a resource ID that exists nowhere would still appear to match. Results
+        are re-checked against the requested values here.
+
+        Returns a dict of event ARN -> matching entities, omitting events with
+        no match.
+        """
+        BATCH_SIZE = 10
+        batches = [event_arns[i : i + BATCH_SIZE] for i in range(0, len(event_arns), BATCH_SIZE)]
+        wanted = {value.casefold() for value in entity_values}
+
+        async def _fetch_batch(batch: list[str]) -> list:
+            try:
+                return await self.paginate(
+                    "describe_affected_entities",
+                    filter={"eventArns": batch, "entityValues": entity_values},
+                )
+            except Exception as e:
+                logger.warning("Entity lookup failed for a batch of %d: %s", len(batch), e)
+                return []
+
+        batch_results = await asyncio.gather(*[_fetch_batch(b) for b in batches])
+
+        result: dict[str, list] = {}
+        for entities in batch_results:
+            for entity in entities:
+                arn = entity.get("eventArn")
+                value = entity.get("entityValue", "")
+                if arn and value.casefold() in wanted:
+                    result.setdefault(arn, []).append(entity)
+        return result
+
     async def get_org_entities_batched(
         self, event_arn: str, account_ids: list[str]
     ) -> dict[str, list]:
@@ -239,10 +326,7 @@ class HealthClient:
         Returns a dict mapping account_id -> list of entities.
         """
         BATCH_SIZE = 10
-        batches = [
-            account_ids[i : i + BATCH_SIZE]
-            for i in range(0, len(account_ids), BATCH_SIZE)
-        ]
+        batches = [account_ids[i : i + BATCH_SIZE] for i in range(0, len(account_ids), BATCH_SIZE)]
 
         async def _fetch_batch(batch: list[str]) -> list:
             try:
@@ -274,6 +358,7 @@ def _response_key(operation: str) -> str:
         "describe_events_for_organization": "events",
         "describe_affected_entities_for_organization": "entities",
         "describe_affected_accounts_for_organization": "affectedAccounts",
+        "describe_event_types": "eventTypes",
     }
     return mapping.get(operation, "events")
 
