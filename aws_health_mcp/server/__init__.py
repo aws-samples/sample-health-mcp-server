@@ -3,4 +3,4 @@
 A Model Context Protocol (MCP) server for monitoring AWS Health events and service status.
 """
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"

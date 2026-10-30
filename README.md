@@ -138,8 +138,40 @@ service list, which is then cached.
 | `CACHE_TTL` | `300` | Cache lifetime in seconds |
 | `SERVICE_LIST_TTL` | `86400` | Cache lifetime for the service catalog |
 
-The Health API is only available through `us-east-1`, so the region is fixed
-and not configurable.
+The region is not configurable; see [Regions and availability](#regions-and-availability).
+
+## Regions and availability
+
+The AWS Health API runs as an active-passive pair: `us-east-1` (active) and
+`us-east-2` (passive), behind a single global endpoint,
+`global.health.amazonaws.com`, whose DNS (10 second TTL) points at whichever
+region is currently active.
+
+- **Which endpoint this server uses.** The client is created for `us-east-1`,
+  which boto3/botocore resolve to `https://global.health.amazonaws.com`. This
+  holds for every botocore release this package supports (checked on 1.34.162
+  and 1.43.89). The server therefore follows AWS's DNS failover; there is no
+  region setting because the global endpoint chooses for you.
+- **No client-side failover.** The server does not detect a failover itself or
+  retry against `us-east-2`. Recovery relies on DNS re-resolution and
+  botocore's retries (3 attempts, adaptive), so requests made during the switch
+  can fail and a long-running server may need a call or two to pick up the new
+  region. Restart the server if calls keep failing after AWS reports the
+  Health API has failed over.
+- **Passive data can lag.** AWS notes that only the active endpoint has the
+  latest data; the passive endpoint is eventually consistent. During an
+  incident, treat results as potentially slightly behind.
+- **Not verified.** Requests to the global endpoint are signed for `us-east-1`
+  (botocore's rule). AWS documents the signing region as that of the *active*
+  endpoint, so it is not confirmed that requests signed for `us-east-1` are
+  accepted after a failover to `us-east-2`. A real failover could not be tested.
+  Calling `health.us-east-2.amazonaws.com` directly requires signing for
+  `us-east-2`; a `us-east-1` signature is rejected with
+  `InvalidSignatureException`.
+
+Pinning the server to `us-east-2` is not supported. Overriding the endpoint
+alone (for example with `AWS_ENDPOINT_URL_HEALTH`) still signs requests for
+`us-east-1` and is rejected with `InvalidSignatureException`.
 
 ## Errors and partial results
 
