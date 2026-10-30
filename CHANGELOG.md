@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+- Documented how regions and failover work: the client uses the global Health
+  endpoint (DNS failover between us-east-1 and us-east-2), there is no
+  client-side failover, passive data can lag, and signing after a real failover
+  is unverified. Corrects the earlier "only available through us-east-1" wording.
+
 ## 2.1.0
 
 ### Added

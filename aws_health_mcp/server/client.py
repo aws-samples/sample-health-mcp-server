@@ -69,6 +69,10 @@ class HealthClient:
     def client(self):
         """Lazily create the boto3 Health client on first use."""
         if self._client is None:
+            # "us-east-1" makes botocore use https://global.health.amazonaws.com
+            # (checked on botocore 1.34.162 and 1.43.89). Its DNS points at the
+            # active region of the Health API's active/passive pair, so failover is
+            # AWS's, not ours. See "Regions and availability" in the README.
             boto_config = BotocoreConfig(
                 region_name="us-east-1",
                 retries={"max_attempts": 3, "mode": "adaptive"},

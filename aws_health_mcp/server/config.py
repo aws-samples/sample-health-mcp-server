@@ -8,8 +8,8 @@ from typing import Optional
 class Config:
     """Configuration settings for the MCP server."""
 
-    # AWS Configuration. There is no AWS_REGION setting: the Health API is only
-    # reachable through us-east-1, which client.py pins.
+    # AWS Configuration. There is no AWS_REGION setting: client.py uses the global
+    # Health endpoint, which follows AWS's active/passive failover.
     AWS_PROFILE: Optional[str] = os.getenv("AWS_PROFILE")
 
     # Logging Configuration
