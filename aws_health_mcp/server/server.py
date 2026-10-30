@@ -6,7 +6,7 @@ from botocore.exceptions import ClientError
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from .client import health_client
+from .client import health_client, last_updated_by_arn
 from .formatters import (
     format_entity,
     format_event,
@@ -111,7 +111,9 @@ async def get_affected_entities() -> str:
         sections = []
         for event in events:
             event_arn = event["arn"]
-            desc = await health_client.get_event_description(event_arn)
+            desc = await health_client.get_event_description(
+                event_arn, event.get("lastUpdatedTime")
+            )
 
             entities = await health_client.paginate(
                 "describe_affected_entities", filter={"eventArns": [event_arn]}
@@ -410,7 +412,7 @@ async def get_org_affected_entities(
         sections = []
         for event in events:
             evt_arn = event["arn"]
-            desc = await health_client.get_event_description(evt_arn)
+            desc = await health_client.get_event_description(evt_arn, event.get("lastUpdatedTime"))
             affected_accounts = await health_client.get_affected_accounts(evt_arn)
 
             if account_id and account_id not in affected_accounts:
@@ -530,7 +532,7 @@ async def get_org_account_events(account_id: str, regions: list[str] | None = No
         sections = []
         for event in account_events:
             evt_arn = event["arn"]
-            desc = await health_client.get_event_description(evt_arn)
+            desc = await health_client.get_event_description(evt_arn, event.get("lastUpdatedTime"))
             accounts = await health_client.get_affected_accounts(evt_arn)
 
             try:
@@ -916,7 +918,9 @@ async def find_events_for_resources(entity_values: list[str], include_closed: bo
             searched = ", ".join(entity_values)
             return f"No health events affect {searched} " f"(searched {len(events_by_arn)} events)."
 
-        descriptions = await health_client.get_event_descriptions_batched(list(matches))
+        descriptions = await health_client.get_event_descriptions_batched(
+            list(matches), last_updated_by_arn(events)
+        )
 
         sections = []
         for arn, entities in matches.items():

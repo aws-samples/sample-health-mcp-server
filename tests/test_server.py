@@ -241,12 +241,130 @@ class TestHealthClient:
             "failedSet": [],
         }
 
-        result1 = await client.get_event_description("arn:test")
-        result2 = await client.get_event_description("arn:test")
+        stamp = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        result1 = await client.get_event_description("arn:test", stamp)
+        result2 = await client.get_event_description("arn:test", stamp)
         assert result1 == "Test desc"
         assert result2 == "Test desc"
         # Only one API call — second hit is cached
         assert client._client.describe_event_details.call_count == 1
+
+    def _details(self, arn, text, updated):
+        return {
+            "successfulSet": [
+                {
+                    "event": {"arn": arn, "lastUpdatedTime": updated},
+                    "eventDescription": {"latestDescription": text},
+                }
+            ],
+            "failedSet": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_description_refetched_when_event_updated(self, client):
+        """An ongoing event rewrites its description; a changed lastUpdatedTime must miss."""
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+        client._client.describe_event_details.side_effect = [
+            self._details("arn:evt", "Investigating", t1),
+            self._details("arn:evt", "Mitigated, recovery in progress", t2),
+        ]
+
+        first = await client.get_event_description("arn:evt", t1)
+        second = await client.get_event_description("arn:evt", t2)
+
+        assert first == "Investigating"
+        assert second == "Mitigated, recovery in progress"
+        assert client._client.describe_event_details.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_description_cached_under_fetched_timestamp(self, client):
+        """The details response is authoritative: if the event moved on between the
+        listing and the fetch, the newer text is filed under the newer timestamp."""
+        listed = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        newer = datetime(2026, 1, 1, 12, 5, tzinfo=timezone.utc)
+        client._client.describe_event_details.return_value = self._details(
+            "arn:evt", "Newer text", newer
+        )
+
+        await client.get_event_description("arn:evt", listed)
+        # A later listing that has caught up with the newer timestamp reuses it.
+        again = await client.get_event_description("arn:evt", newer)
+
+        assert again == "Newer text"
+        assert client._client.describe_event_details.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_description_without_timestamp_is_never_served_from_cache(self, client):
+        """With no lastUpdatedTime the entry cannot be checked for staleness."""
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        client._client.describe_event_details.return_value = self._details("arn:evt", "Text", t1)
+
+        await client.get_event_description("arn:evt")
+        await client.get_event_description("arn:evt")
+        await client.get_event_descriptions_batched(["arn:evt"])
+
+        assert client._client.describe_event_details.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_failed_description_fetch_is_not_cached(self, client):
+        """The 'not available' placeholder must not stick for the whole cache TTL."""
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        client._client.describe_event_details.return_value = {
+            "successfulSet": [],
+            "failedSet": [{"eventArn": "arn:evt"}],
+        }
+        client._client.describe_event_details_for_organization.return_value = {
+            "successfulSet": [],
+            "failedSet": [],
+        }
+        assert await client.get_event_description("arn:evt", t1) == "Description not available"
+
+        client._client.describe_event_details.return_value = self._details(
+            "arn:evt", "Recovered text", t1
+        )
+        assert await client.get_event_description("arn:evt", t1) == "Recovered text"
+
+    @pytest.mark.asyncio
+    async def test_batched_descriptions_only_refetch_changed_events(self, client):
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+        texts = {"arn:a": "A v1", "arn:b": "B v1"}
+
+        def describe(eventArns):
+            return {
+                "successfulSet": [
+                    {
+                        "event": {"arn": a, "lastUpdatedTime": t1},
+                        "eventDescription": {"latestDescription": texts[a]},
+                    }
+                    for a in eventArns
+                ],
+                "failedSet": [],
+            }
+
+        client._client.describe_event_details.side_effect = describe
+        await client.get_event_descriptions_batched(["arn:a", "arn:b"], {"arn:a": t1, "arn:b": t1})
+
+        texts["arn:b"] = "B v2"
+
+        def describe_b(eventArns):
+            assert eventArns == ["arn:b"], "unchanged event A must come from cache"
+            return {
+                "successfulSet": [
+                    {
+                        "event": {"arn": "arn:b", "lastUpdatedTime": t2},
+                        "eventDescription": {"latestDescription": "B v2"},
+                    }
+                ],
+                "failedSet": [],
+            }
+
+        client._client.describe_event_details.side_effect = describe_b
+        result = await client.get_event_descriptions_batched(
+            ["arn:a", "arn:b"], {"arn:a": t1, "arn:b": t2}
+        )
+        assert result == {"arn:a": "A v1", "arn:b": "B v2"}
 
     @pytest.mark.asyncio
     async def test_get_event_descriptions_batched(self, client):

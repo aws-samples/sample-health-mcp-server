@@ -17,6 +17,25 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENCY = int(os.getenv("HEALTH_API_MAX_CONCURRENCY", "5"))
 
 _SERVICES_CACHE_KEY = "known_services"
+_DESC_MISSING = "Description not available"
+
+
+def _stamp(last_updated) -> Optional[str]:
+    """Normalise a lastUpdatedTime (datetime or str) into a cache-key component."""
+    if last_updated is None:
+        return None
+    return last_updated.isoformat() if hasattr(last_updated, "isoformat") else str(last_updated)
+
+
+def last_updated_by_arn(events: list[dict]) -> dict[str, object]:
+    """Map event ARN -> lastUpdatedTime for events as returned by describe_events."""
+    return {
+        e["arn"]: e["lastUpdatedTime"] for e in events if e.get("arn") and e.get("lastUpdatedTime")
+    }
+
+
+def _desc_key(arn: str, last_updated) -> str:
+    return f"desc:{arn}:{_stamp(last_updated)}"
 
 
 class HealthClient:
@@ -124,29 +143,41 @@ class HealthClient:
         logger.debug("Loaded %d AWS Health service codes", len(services))
         return services
 
-    async def get_event_description(self, event_arn: str) -> str:
-        """Get a single event description. Prefer get_event_descriptions_batched for multiple."""
-        cache_key = f"desc:{event_arn}"
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            return cached
+    async def get_event_description(self, event_arn: str, last_updated=None) -> str:
+        """Get a single event description. Prefer get_event_descriptions_batched for multiple.
 
-        results = await self.get_event_descriptions_batched([event_arn])
-        return results.get(event_arn, "Description not available")
+        ``last_updated`` is the event's lastUpdatedTime from the listing call; see
+        get_event_descriptions_batched for how it is used.
+        """
+        stamps = {event_arn: last_updated} if last_updated is not None else None
+        results = await self.get_event_descriptions_batched([event_arn], stamps)
+        return results.get(event_arn, _DESC_MISSING)
 
-    async def get_event_descriptions_batched(self, event_arns: list[str]) -> dict[str, str]:
+    async def get_event_descriptions_batched(
+        self, event_arns: list[str], last_updated: Optional[dict[str, object]] = None
+    ) -> dict[str, str]:
         """Fetch descriptions for multiple events in batched API calls.
 
         describe_event_details accepts up to 10 ARNs per call.
         Falls back to the org API for any ARNs that fail.
-        Results are cached individually.
+
+        AWS keeps rewriting an event's latestDescription while it is open, so a
+        description is cached per (ARN, lastUpdatedTime) rather than per ARN.
+        ``last_updated`` maps ARN -> the lastUpdatedTime the caller just saw in
+        a listing; a cached entry is only reused when it matches. An ARN with no
+        known lastUpdatedTime cannot be checked for staleness, so it is always
+        fetched fresh.
         """
+        last_updated = last_updated or {}
+        fetched_stamps: dict[str, object] = {}
         BATCH_SIZE = 10
         result: dict[str, str] = {}
         uncached_arns: list[str] = []
 
         for arn in event_arns:
-            cached = self._cache_get(f"desc:{arn}")
+            cached = None
+            if last_updated.get(arn) is not None:
+                cached = self._cache_get(_desc_key(arn, last_updated[arn]))
             if cached is not None:
                 result[arn] = cached
             else:
@@ -170,6 +201,7 @@ class HealthClient:
                     desc = detail.get("eventDescription", {}).get("latestDescription", "")
                     if arn and desc:
                         batch_result[arn] = desc
+                        fetched_stamps[arn] = detail.get("event", {}).get("lastUpdatedTime")
                 for failure in response.get("failedSet", []):
                     failed_arn = failure.get("eventArn", "")
                     if failed_arn:
@@ -201,6 +233,7 @@ class HealthClient:
                         desc = detail.get("eventDescription", {}).get("latestDescription", "")
                         if arn and desc:
                             batch_result[arn] = desc
+                            fetched_stamps[arn] = detail.get("event", {}).get("lastUpdatedTime")
                 except Exception:
                     pass
                 return batch_result
@@ -209,11 +242,16 @@ class HealthClient:
             for br in org_results:
                 result.update(br)
 
-        # Fill missing with default and cache everything
+        # Cache real descriptions under the lastUpdatedTime they were fetched at
+        # (the details response is authoritative, the listing's value is a fallback).
+        # The placeholder is never cached, so a failed fetch is retried next time.
         for arn in uncached_arns:
-            desc = result.get(arn, "Description not available")
-            result[arn] = desc
-            self._cache_set(f"desc:{arn}", desc)
+            if arn in result:
+                stamp = fetched_stamps.get(arn) or last_updated.get(arn)
+                if stamp is not None:
+                    self._cache_set(_desc_key(arn, stamp), result[arn])
+            else:
+                result[arn] = _DESC_MISSING
 
         return result
 

@@ -5,6 +5,7 @@ import difflib
 import re
 from typing import TYPE_CHECKING, Iterable, Optional
 
+from .client import last_updated_by_arn
 from .consts import SERVICE_ALIASES
 
 if TYPE_CHECKING:
@@ -149,7 +150,9 @@ async def format_events_batch(
     valid_arns = [a for a in arns if a]
 
     # Single batched call for all descriptions (10 ARNs per API call)
-    descriptions = await client.get_event_descriptions_batched(valid_arns)
+    descriptions = await client.get_event_descriptions_batched(
+        valid_arns, last_updated_by_arn(events)
+    )
 
     # Fetch accounts in parallel if needed
     accounts_map: dict[str, list[str]] = {}
