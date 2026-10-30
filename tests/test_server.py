@@ -52,7 +52,7 @@ def test_config_defaults():
 def test_server_version():
     from aws_health_mcp.server import __version__
 
-    assert __version__ == "2.0.0"
+    assert __version__ == "2.1.0"
 
 
 class TestCompressServiceName:

@@ -122,7 +122,9 @@ Pass service names however you like — `EC2`, `ec2`, `Step Functions`,
 `api gateway` all resolve. The valid set comes from the Health API itself, so
 every service AWS covers is reachable, and names are mapped to the codes AWS
 actually uses (Step Functions is `STATES`, EventBridge is `EVENTS`). Use
-`list_event_types` to browse them.
+`list_event_types` to browse them. Common names resolve in about a second; an
+unrecognised name (a typo, say) triggers a one-time ~8 second load of the full
+service list, which is then cached.
 
 ## Environment Variables
 
@@ -138,6 +140,19 @@ actually uses (Step Functions is `STATES`, EventBridge is `EVENTS`). Use
 
 The Health API is only available through `us-east-1`, so the region is fixed
 and not configurable.
+
+## Errors and partial results
+
+Failures are reported, never turned into an empty answer:
+
+- **Tool errors** (no Health access, API rejection, throttling that stops a
+  request) are returned with the MCP `isError` flag set, so clients and agents
+  can tell a failure from a result.
+- **Partial results:** when one lookup inside a larger answer fails (for example
+  the affected accounts of a single event), the rest is still returned with a
+  "Warning: partial results" footer naming what is missing.
+- **Searches:** `find_events_for_resources` returns an error rather than "no
+  event affects it" if some events could not be checked.
 
 ## Troubleshooting
 
