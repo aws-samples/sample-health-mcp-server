@@ -5,6 +5,12 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  # An upstream release can break the server with no commit here to trigger CI.
+  # That is exactly how mcp 2.x renaming FastMCP shipped unnoticed: the repo was
+  # green because nothing had run since before the release.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   test:
@@ -41,6 +47,41 @@ jobs:
     - name: Test with pytest
       run: |
         pytest tests/ -v
+
+    # The unit tests import the tool functions directly, so they would still
+    # pass if the server could not actually start. This starts it over stdio and
+    # completes an MCP handshake -- the check that would have caught the mcp 2.x
+    # break immediately. It needs no AWS credentials: the client is lazy, so
+    # nothing calls AWS until a tool runs.
+    - name: Verify the server starts and serves tools over stdio
+      run: |
+        python - <<'EOF'
+        import asyncio, sys
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        EXPECTED_TOOLS = 18
+
+        async def main():
+            params = StdioServerParameters(
+                command=sys.executable, args=["-m", "aws_health_mcp.server"]
+            )
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools = (await session.list_tools()).tools
+                    print(f"server started, {len(tools)} tools registered")
+                    assert len(tools) == EXPECTED_TOOLS, (
+                        f"expected {EXPECTED_TOOLS} tools, got {len(tools)}: "
+                        f"{sorted(t.name for t in tools)}"
+                    )
+                    for tool in tools:
+                        assert tool.annotations and tool.annotations.readOnlyHint, (
+                            f"{tool.name} is not annotated read-only"
+                        )
+
+        asyncio.run(main())
+        EOF
 
   build:
     needs: test
