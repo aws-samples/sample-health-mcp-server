@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 MAX_CONCURRENCY = int(os.getenv("HEALTH_API_MAX_CONCURRENCY", "5"))
 
+_SERVICES_CACHE_KEY = "known_services"
+
 
 class HealthClient:
     """AWS Health API client wrapper with lazy init, caching, and async support."""
@@ -40,14 +42,14 @@ class HealthClient:
             logger.info("AWS Health API client initialized")
         return self._client
 
-    def _cache_get(self, key: str):
+    def _cache_get(self, key: str, ttl: Optional[int] = None):
         if not Config.ENABLE_CACHE:
             return None
         entry = self._cache.get(key)
         if entry is None:
             return None
         ts, value = entry
-        if _time.time() - ts > Config.CACHE_TTL:
+        if _time.time() - ts > (Config.CACHE_TTL if ttl is None else ttl):
             del self._cache[key]
             return None
         return value
@@ -80,6 +82,34 @@ class HealthClient:
                 return method(**kwargs)
 
             return await asyncio.to_thread(_sync)
+
+    async def get_known_services(self) -> Optional[list[str]]:
+        """Return every service code AWS Health knows about, or None if unavailable.
+
+        This is the authoritative replacement for a hardcoded service list. The
+        result changes rarely, so it is cached for ``Config.SERVICE_LIST_TTL``
+        (24h by default) rather than the short default TTL.
+
+        Returns None when the API cannot be reached, which callers should treat
+        as "cannot validate" rather than "no services exist".
+        """
+        cached = self._cache_get(_SERVICES_CACHE_KEY, ttl=Config.SERVICE_LIST_TTL)
+        if cached is not None:
+            return cached
+
+        try:
+            event_types = await self.paginate("describe_event_types")
+        except Exception as e:
+            logger.warning("Could not fetch AWS Health service list: %s", e)
+            return None
+
+        services = sorted({et["service"] for et in event_types if et.get("service")})
+        if not services:
+            return None
+
+        self._cache_set(_SERVICES_CACHE_KEY, services)
+        logger.debug("Loaded %d AWS Health service codes", len(services))
+        return services
 
     async def get_event_description(self, event_arn: str) -> str:
         """Get a single event description. Prefer get_event_descriptions_batched for multiple."""
@@ -273,6 +303,7 @@ def _response_key(operation: str) -> str:
         "describe_events_for_organization": "events",
         "describe_affected_entities_for_organization": "entities",
         "describe_affected_accounts_for_organization": "affectedAccounts",
+        "describe_event_types": "eventTypes",
     }
     return mapping.get(operation, "events")
 

@@ -24,6 +24,9 @@ class Config:
     # Cache Configuration
     CACHE_TTL: int = int(os.getenv("CACHE_TTL", "300"))  # 5 minutes
     ENABLE_CACHE: bool = os.getenv("ENABLE_CACHE", "true").lower() == "true"
+    # The set of services AWS Health covers changes rarely, so it is cached far
+    # longer than event data.
+    SERVICE_LIST_TTL: int = int(os.getenv("SERVICE_LIST_TTL", "86400"))  # 24 hours
 
     # Server Configuration
     SERVER_NAME: str = os.getenv("SERVER_NAME", "aws-health")

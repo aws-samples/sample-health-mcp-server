@@ -6,16 +6,35 @@ from botocore.exceptions import ClientError
 from mcp.server.fastmcp import FastMCP
 
 from .client import health_client
-from .consts import VALID_AWS_SERVICES
 from .formatters import (
     format_entity,
     format_event,
     format_events_batch,
-    format_timestamp,
     validate_service_name,
 )
 
 mcp = FastMCP("aws-health")
+
+
+async def _resolve_service(service: str) -> tuple[str | None, str]:
+    """Resolve a service name against the live AWS Health service list.
+
+    Returns ``(service_code, "")`` on success, or ``(None, error_message)`` with
+    a message that suggests a real alternative where one plausibly exists.
+    """
+    known = await health_client.get_known_services()
+    is_valid, resolved = validate_service_name(service, known)
+    if is_valid:
+        return resolved, ""
+
+    if resolved:
+        return None, f"Unknown AWS service: {service}. Did you mean '{resolved}'?"
+    hint = (
+        " Use list_event_types to see the services AWS Health covers."
+        if known
+        else " Could not reach AWS Health to list valid services."
+    )
+    return None, f"Unknown AWS service: {service}.{hint}"
 
 
 @mcp.tool()
@@ -111,10 +130,9 @@ async def get_service_events(service: str) -> str:
         if not has_access:
             return f"Cannot fetch health events: {error_message}"
 
-        is_valid, normalized_service = validate_service_name(service)
-        if not is_valid:
-            suggestion = f"\nDid you mean '{normalized_service}'?" if normalized_service else ""
-            return f"Invalid service name: {service}.{suggestion}\nValid examples: {', '.join(VALID_AWS_SERVICES[:5])}"
+        normalized_service, error = await _resolve_service(service)
+        if not normalized_service:
+            return error
 
         events = await health_client.paginate(
             "describe_events",
@@ -153,10 +171,9 @@ async def get_completed_events(service: str | None = None) -> str:
         normalized_service = None
 
         if service:
-            is_valid, normalized_service = validate_service_name(service)
-            if not is_valid:
-                suggestion = f"\nDid you mean '{normalized_service}'?" if normalized_service else ""
-                return f"Invalid service name: {service}.{suggestion}\nValid examples: {', '.join(VALID_AWS_SERVICES[:5])}"
+            normalized_service, error = await _resolve_service(service)
+            if not normalized_service:
+                return error
             filter_params["services"] = [normalized_service]
 
         events = await health_client.paginate("describe_events", filter=filter_params)
@@ -246,10 +263,9 @@ async def get_org_health_events(
         normalized_service = None
 
         if service:
-            is_valid, normalized_service = validate_service_name(service)
-            if not is_valid:
-                suggestion = f"\nDid you mean '{normalized_service}'?" if normalized_service else ""
-                return f"Invalid service name: {service}.{suggestion}\nValid examples: {', '.join(VALID_AWS_SERVICES[:5])}"
+            normalized_service, error = await _resolve_service(service)
+            if not normalized_service:
+                return error
             filter_params["services"] = [normalized_service]
 
         events = await health_client.paginate(
@@ -411,10 +427,9 @@ async def get_org_service_events(service: str) -> str:
         if not has_access:
             return f"Cannot fetch organization events: {error_message}"
 
-        is_valid, normalized_service = validate_service_name(service)
-        if not is_valid:
-            suggestion = f"\nDid you mean '{normalized_service}'?" if normalized_service else ""
-            return f"Invalid service name: {service}.{suggestion}\nValid examples: {', '.join(VALID_AWS_SERVICES[:5])}"
+        normalized_service, error = await _resolve_service(service)
+        if not normalized_service:
+            return error
 
         events = await health_client.paginate(
             "describe_events_for_organization",

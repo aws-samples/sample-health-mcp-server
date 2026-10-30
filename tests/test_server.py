@@ -7,13 +7,36 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aws_health_mcp.server.config import Config
-from aws_health_mcp.server.consts import VALID_AWS_SERVICES
 from aws_health_mcp.server.formatters import (
+    compress_service_name,
     format_entity,
     format_event,
     format_timestamp,
     validate_service_name,
 )
+
+# A representative slice of real DescribeEventTypes service codes. Tests pass
+# this explicitly so they never depend on network access.
+KNOWN_SERVICES = [
+    "APIGATEWAY",
+    "BEDROCK",
+    "CLOUDFORMATION",
+    "CLOUDTRAIL",
+    "COGNITO",
+    "DYNAMODB",
+    "EC2",
+    "ELASTICFILESYSTEM",
+    "ELASTICLOADBALANCING",
+    "ES",
+    "EVENTS",
+    "KINESIS_VIDEO",
+    "LAMBDA",
+    "ORGANIZATIONS",
+    "RDS",
+    "S3",
+    "STATES",
+    "STORAGEGATEWAY",
+]
 
 
 def test_config_validation():
@@ -31,41 +54,84 @@ def test_server_version():
     assert __version__ == "2.0.0"
 
 
+class TestCompressServiceName:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("EC2", "EC2"),
+            ("ec2", "EC2"),
+            ("Kinesis Video", "KINESISVIDEO"),
+            ("kinesis-video", "KINESISVIDEO"),
+            ("KINESIS_VIDEO", "KINESISVIDEO"),
+            ("Storage Gateway", "STORAGEGATEWAY"),
+        ],
+    )
+    def test_compression(self, raw, expected):
+        assert compress_service_name(raw) == expected
+
+
 class TestValidateServiceName:
     def test_direct_match(self):
-        is_valid, normalized = validate_service_name("EC2")
-        assert is_valid is True
-        assert normalized == "EC2"
+        assert validate_service_name("EC2", KNOWN_SERVICES) == (True, "EC2")
 
     def test_case_insensitive(self):
-        is_valid, normalized = validate_service_name("ec2")
-        assert is_valid is True
-        assert normalized == "EC2"
+        assert validate_service_name("ec2", KNOWN_SERVICES) == (True, "EC2")
 
     def test_alias_mapping(self):
-        is_valid, normalized = validate_service_name("ELB")
-        assert is_valid is True
-        assert normalized == "ELASTICLOADBALANCING"
+        assert validate_service_name("ELB", KNOWN_SERVICES) == (
+            True,
+            "ELASTICLOADBALANCING",
+        )
 
     def test_hyphen_handling(self):
-        is_valid, normalized = validate_service_name("dynamo-db")
+        assert validate_service_name("dynamo-db", KNOWN_SERVICES) == (True, "DYNAMODB")
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            # Separator differences resolve without an alias entry
+            ("api gateway", "APIGATEWAY"),
+            ("Kinesis Video", "KINESIS_VIDEO"),
+            ("storage-gateway", "STORAGEGATEWAY"),
+            # Semantic aliases: the common name differs from the Health code
+            ("Step Functions", "STATES"),
+            ("EventBridge", "EVENTS"),
+            ("EFS", "ELASTICFILESYSTEM"),
+            ("OpenSearch", "ES"),
+        ],
+    )
+    def test_resolves_to_real_service_code(self, raw, expected):
+        """Names the old hardcoded list either rejected or silently mismapped."""
+        assert validate_service_name(raw, KNOWN_SERVICES) == (True, expected)
+
+    @pytest.mark.parametrize("raw", ["Bedrock", "CloudTrail", "Organizations"])
+    def test_services_missing_from_old_hardcoded_list(self, raw):
+        """These were unreachable before the list came from the API."""
+        is_valid, resolved = validate_service_name(raw, KNOWN_SERVICES)
         assert is_valid is True
-        assert normalized == "DYNAMODB"
+        assert resolved == raw.upper()
 
     def test_invalid_with_suggestion(self):
-        is_valid, normalized = validate_service_name("LAMBDAA")
-        assert is_valid is False
-        assert normalized == "LAMBDA"
+        assert validate_service_name("LAMBDAA", KNOWN_SERVICES) == (False, "LAMBDA")
 
     def test_invalid_no_suggestion(self):
-        is_valid, normalized = validate_service_name("ZZZZNOTASERVICE")
-        assert is_valid is False
-        assert normalized == ""
+        assert validate_service_name("ZZZZNOTASERVICE", KNOWN_SERVICES) == (False, "")
+
+    def test_no_misleading_cross_service_suggestion(self):
+        """0.6 cutoff used to answer 'CloudTrial' with a different service."""
+        is_valid, resolved = validate_service_name("CLOUDTRIAL", KNOWN_SERVICES)
+        assert resolved != "CLOUDFORMATION"
 
     def test_empty_string(self):
-        is_valid, normalized = validate_service_name("")
-        assert is_valid is False
-        assert normalized == ""
+        assert validate_service_name("", KNOWN_SERVICES) == (False, "")
+
+    def test_whitespace_only(self):
+        assert validate_service_name("   ", KNOWN_SERVICES) == (False, "")
+
+    def test_offline_mode_accepts_rather_than_rejects(self):
+        """With no service list, defer to AWS instead of denying a real service."""
+        assert validate_service_name("BEDROCK", None) == (True, "BEDROCK")
+        assert validate_service_name("Step Functions", None) == (True, "STATES")
 
 
 class TestFormatTimestamp:
@@ -218,9 +284,7 @@ class TestHealthClient:
     @pytest.mark.asyncio
     async def test_get_affected_accounts_caches(self, client):
         mock_paginator = MagicMock()
-        mock_paginator.paginate.return_value = [
-            {"affectedAccounts": ["111111111111"]}
-        ]
+        mock_paginator.paginate.return_value = [{"affectedAccounts": ["111111111111"]}]
         client._client.get_paginator.return_value = mock_paginator
 
         result1 = await client.get_affected_accounts("arn:evt")
@@ -249,10 +313,32 @@ class TestServerTools:
     @pytest.mark.asyncio
     async def test_get_service_events_invalid_service(self):
         self.mock_client.check_health_api_access = AsyncMock(return_value=(True, None))
+        self.mock_client.get_known_services = AsyncMock(return_value=["EC2", "RDS"])
         from aws_health_mcp.server.server import get_service_events
 
         result = await get_service_events("NOTAREALSERVICE")
-        assert "Invalid service name" in result
+        assert "Unknown AWS service" in result
+
+    @pytest.mark.asyncio
+    async def test_get_service_events_suggests_real_service(self):
+        self.mock_client.check_health_api_access = AsyncMock(return_value=(True, None))
+        self.mock_client.get_known_services = AsyncMock(return_value=["EC2", "LAMBDA"])
+        from aws_health_mcp.server.server import get_service_events
+
+        result = await get_service_events("LAMBDAA")
+        assert "Did you mean 'LAMBDA'?" in result
+
+    @pytest.mark.asyncio
+    async def test_get_service_events_accepts_service_absent_from_old_list(self):
+        """BEDROCK was rejected outright by the hardcoded list."""
+        self.mock_client.check_health_api_access = AsyncMock(return_value=(True, None))
+        self.mock_client.get_known_services = AsyncMock(return_value=["BEDROCK", "EC2"])
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_service_events
+
+        result = await get_service_events("Bedrock")
+        assert "BEDROCK" in result
+        assert "Unknown AWS service" not in result
 
     @pytest.mark.asyncio
     async def test_get_service_events_no_access(self):
@@ -266,9 +352,7 @@ class TestServerTools:
 
     @pytest.mark.asyncio
     async def test_get_org_health_events_no_access(self):
-        self.mock_client.check_org_health_access = AsyncMock(
-            return_value=(False, "Not enabled")
-        )
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(False, "Not enabled"))
         from aws_health_mcp.server.server import get_org_health_events
 
         result = await get_org_health_events()
