@@ -30,7 +30,7 @@ class Config:
 
     # Server Configuration
     SERVER_NAME: str = os.getenv("SERVER_NAME", "aws-health")
-    SERVER_VERSION: str = "2.0.0"
+    SERVER_VERSION: str = "2.1.0"
 
     @classmethod
     def get_config_dir(cls) -> Path:

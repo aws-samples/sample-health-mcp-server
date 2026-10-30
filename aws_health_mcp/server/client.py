@@ -17,6 +17,44 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENCY = int(os.getenv("HEALTH_API_MAX_CONCURRENCY", "5"))
 
 _SERVICES_CACHE_KEY = "known_services"
+_DESC_MISSING = "Description not available"
+
+
+def _stamp(last_updated) -> Optional[str]:
+    """Normalise a lastUpdatedTime (datetime or str) into a cache-key component."""
+    if last_updated is None:
+        return None
+    return last_updated.isoformat() if hasattr(last_updated, "isoformat") else str(last_updated)
+
+
+def last_updated_by_arn(events: list[dict]) -> dict[str, object]:
+    """Map event ARN -> lastUpdatedTime for events as returned by describe_events."""
+    return {
+        e["arn"]: e["lastUpdatedTime"] for e in events if e.get("arn") and e.get("lastUpdatedTime")
+    }
+
+
+def describe_error(error: Exception) -> str:
+    if isinstance(error, ClientError):
+        return error.response.get("Error", {}).get("Code", "ClientError")
+    return (str(error) or type(error).__name__)[:120]
+
+
+def record_failure(warnings: Optional[list[str]], message: str, error: Exception) -> None:
+    """Note a lookup that failed, or re-raise it if the caller did not ask for partial results.
+
+    Callers that can still produce a useful answer pass a ``warnings`` list and
+    surface it to the user. Everyone else gets the exception, so a throttled or
+    denied call can never be mistaken for "nothing found".
+    """
+    if warnings is None:
+        raise error
+    logger.warning("%s: %s", message, error)
+    warnings.append(f"{message} ({describe_error(error)})")
+
+
+def _desc_key(arn: str, last_updated) -> str:
+    return f"desc:{arn}:{_stamp(last_updated)}"
 
 
 class HealthClient:
@@ -60,6 +98,10 @@ class HealthClient:
 
     async def paginate(self, operation: str, **kwargs) -> list:
         """Paginate a Health API operation off the event loop, with concurrency control."""
+        # The Health API returns only 10 items per page unless asked for more
+        # (100 is the maximum on every paginated operation used here). The default
+        # turned DescribeEventTypes alone into ~275 sequential requests.
+        kwargs.setdefault("PaginationConfig", {"PageSize": 100})
         async with self._semaphore:
 
             def _sync():
@@ -96,6 +138,40 @@ class HealthClient:
             logger.warning("Could not resolve AWS caller identity: %s", e)
             return None
 
+    def cached_services(self) -> Optional[list[str]]:
+        """The full service list if it has already been loaded, without any API call."""
+        return self._cache_get(_SERVICES_CACHE_KEY, ttl=Config.SERVICE_LIST_TTL)
+
+    async def confirm_service(self, candidates: list[str]) -> Optional[str]:
+        """Return the first of ``candidates`` that is a real Health service code, else None.
+
+        One small DescribeEventTypes call per candidate, run concurrently. This lets
+        a common name like "EC2" or "Bedrock" resolve in well under a second instead
+        of waiting for the full service list (see get_known_services). A failed
+        probe counts as "not confirmed", never as "does not exist".
+        """
+
+        async def _probe(code: str) -> Optional[str]:
+            key = f"service_ok:{code}"
+            if self._cache_get(key, ttl=Config.SERVICE_LIST_TTL):
+                return code
+            try:
+                response = await self.call(
+                    "describe_event_types", filter={"services": [code]}, maxResults=10
+                )
+            except Exception as e:
+                logger.debug("Service probe for %s failed: %s", code, e)
+                return None
+            if not response.get("eventTypes"):
+                return None
+            self._cache_set(key, True)
+            return code
+
+        for code in await asyncio.gather(*[_probe(c) for c in candidates]):
+            if code:
+                return code
+        return None
+
     async def get_known_services(self) -> Optional[list[str]]:
         """Return every service code AWS Health knows about, or None if unavailable.
 
@@ -124,29 +200,51 @@ class HealthClient:
         logger.debug("Loaded %d AWS Health service codes", len(services))
         return services
 
-    async def get_event_description(self, event_arn: str) -> str:
-        """Get a single event description. Prefer get_event_descriptions_batched for multiple."""
-        cache_key = f"desc:{event_arn}"
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            return cached
+    async def get_event_description(
+        self, event_arn: str, last_updated=None, warnings: Optional[list[str]] = None
+    ) -> str:
+        """Get a single event description. Prefer get_event_descriptions_batched for multiple.
 
-        results = await self.get_event_descriptions_batched([event_arn])
-        return results.get(event_arn, "Description not available")
+        ``last_updated`` is the event's lastUpdatedTime from the listing call; see
+        get_event_descriptions_batched for how it is used.
+        """
+        stamps = {event_arn: last_updated} if last_updated is not None else None
+        results = await self.get_event_descriptions_batched([event_arn], stamps, warnings)
+        return results.get(event_arn, _DESC_MISSING)
 
-    async def get_event_descriptions_batched(self, event_arns: list[str]) -> dict[str, str]:
+    async def get_event_descriptions_batched(
+        self,
+        event_arns: list[str],
+        last_updated: Optional[dict[str, object]] = None,
+        warnings: Optional[list[str]] = None,
+    ) -> dict[str, str]:
         """Fetch descriptions for multiple events in batched API calls.
 
         describe_event_details accepts up to 10 ARNs per call.
         Falls back to the org API for any ARNs that fail.
-        Results are cached individually.
+
+        AWS keeps rewriting an event's latestDescription while it is open, so a
+        description is cached per (ARN, lastUpdatedTime) rather than per ARN.
+        ``last_updated`` maps ARN -> the lastUpdatedTime the caller just saw in
+        a listing; a cached entry is only reused when it matches. An ARN with no
+        known lastUpdatedTime cannot be checked for staleness, so it is always
+        fetched fresh.
+
+        An ARN that could not be fetched because the call itself failed (as
+        opposed to the API reporting it unknown) gets the placeholder text and,
+        if a ``warnings`` list is passed, a note there.
         """
+        last_updated = last_updated or {}
+        fetched_stamps: dict[str, object] = {}
+        call_errors: dict[str, Exception] = {}
         BATCH_SIZE = 10
         result: dict[str, str] = {}
         uncached_arns: list[str] = []
 
         for arn in event_arns:
-            cached = self._cache_get(f"desc:{arn}")
+            cached = None
+            if last_updated.get(arn) is not None:
+                cached = self._cache_get(_desc_key(arn, last_updated[arn]))
             if cached is not None:
                 result[arn] = cached
             else:
@@ -170,12 +268,14 @@ class HealthClient:
                     desc = detail.get("eventDescription", {}).get("latestDescription", "")
                     if arn and desc:
                         batch_result[arn] = desc
+                        fetched_stamps[arn] = detail.get("event", {}).get("lastUpdatedTime")
                 for failure in response.get("failedSet", []):
                     failed_arn = failure.get("eventArn", "")
                     if failed_arn:
                         failed_arns.append(failed_arn)
-            except Exception:
+            except Exception as e:
                 failed_arns.extend(batch)
+                call_errors.update({arn: e for arn in batch})
             return batch_result
 
         batch_results = await asyncio.gather(*[_fetch_batch(b) for b in batches])
@@ -201,19 +301,36 @@ class HealthClient:
                         desc = detail.get("eventDescription", {}).get("latestDescription", "")
                         if arn and desc:
                             batch_result[arn] = desc
-                except Exception:
-                    pass
+                            fetched_stamps[arn] = detail.get("event", {}).get("lastUpdatedTime")
+                except Exception as e:
+                    # Keep the first error (from the primary API) unless it was a
+                    # plain "not found" there, in which case this one explains more.
+                    for arn in batch:
+                        call_errors.setdefault(arn, e)
                 return batch_result
 
             org_results = await asyncio.gather(*[_fetch_org_batch(b) for b in org_batches])
             for br in org_results:
                 result.update(br)
 
-        # Fill missing with default and cache everything
+        # Cache real descriptions under the lastUpdatedTime they were fetched at
+        # (the details response is authoritative, the listing's value is a fallback).
+        # The placeholder is never cached, so a failed fetch is retried next time.
         for arn in uncached_arns:
-            desc = result.get(arn, "Description not available")
-            result[arn] = desc
-            self._cache_set(f"desc:{arn}", desc)
+            if arn in result:
+                stamp = fetched_stamps.get(arn) or last_updated.get(arn)
+                if stamp is not None:
+                    self._cache_set(_desc_key(arn, stamp), result[arn])
+            else:
+                result[arn] = _DESC_MISSING
+
+        failed = [arn for arn in uncached_arns if arn not in fetched_stamps and arn in call_errors]
+        if failed and warnings is not None:
+            first = call_errors[failed[0]]
+            warnings.append(
+                f"descriptions could not be retrieved for {len(failed)} event(s) "
+                f"({describe_error(first)})"
+            )
 
         return result
 
@@ -256,8 +373,14 @@ class HealthClient:
         except Exception as e:
             return False, str(e)
 
-    async def get_affected_accounts(self, event_arn: str) -> list[str]:
-        """Get affected accounts for an org event, with caching and pagination."""
+    async def get_affected_accounts(
+        self, event_arn: str, warnings: Optional[list[str]] = None
+    ) -> list[str]:
+        """Get affected accounts for an org event, with caching and pagination.
+
+        A failed lookup is raised unless a ``warnings`` list is passed, in which
+        case it is noted there and ``[]`` is returned. Failures are not cached.
+        """
         cache_key = f"accounts:{event_arn}"
         cached = self._cache_get(cache_key)
         if cached is not None:
@@ -267,14 +390,18 @@ class HealthClient:
             accounts = await self.paginate(
                 "describe_affected_accounts_for_organization", eventArn=event_arn
             )
-        except Exception:
-            accounts = []
+        except Exception as e:
+            record_failure(warnings, f"affected accounts unavailable for {event_arn}", e)
+            return []
 
         self._cache_set(cache_key, accounts)
         return accounts
 
     async def find_entities_for_values(
-        self, event_arns: list[str], entity_values: list[str]
+        self,
+        event_arns: list[str],
+        entity_values: list[str],
+        warnings: Optional[list[str]] = None,
     ) -> dict[str, list]:
         """Find which of ``event_arns`` affect any of ``entity_values``.
 
@@ -288,7 +415,8 @@ class HealthClient:
         are re-checked against the requested values here.
 
         Returns a dict of event ARN -> matching entities, omitting events with
-        no match.
+        no match. A batch whose lookup failed is raised unless a ``warnings`` list
+        is passed, so "no match" is never reported for events that were not checked.
         """
         BATCH_SIZE = 10
         batches = [event_arns[i : i + BATCH_SIZE] for i in range(0, len(event_arns), BATCH_SIZE)]
@@ -301,7 +429,9 @@ class HealthClient:
                     filter={"eventArns": batch, "entityValues": entity_values},
                 )
             except Exception as e:
-                logger.warning("Entity lookup failed for a batch of %d: %s", len(batch), e)
+                record_failure(
+                    warnings, f"resource lookup failed for {len(batch)} event(s), not checked", e
+                )
                 return []
 
         batch_results = await asyncio.gather(*[_fetch_batch(b) for b in batches])
@@ -316,14 +446,15 @@ class HealthClient:
         return result
 
     async def get_org_entities_batched(
-        self, event_arn: str, account_ids: list[str]
+        self, event_arn: str, account_ids: list[str], warnings: Optional[list[str]] = None
     ) -> dict[str, list]:
         """Fetch affected entities for multiple accounts efficiently.
 
         Batches account IDs into groups of 10 (API limit for organizationEntityFilters)
         and fetches them concurrently with semaphore protection.
 
-        Returns a dict mapping account_id -> list of entities.
+        Returns a dict mapping account_id -> list of entities. A failed batch is
+        raised unless a ``warnings`` list is passed.
         """
         BATCH_SIZE = 10
         batches = [account_ids[i : i + BATCH_SIZE] for i in range(0, len(account_ids), BATCH_SIZE)]
@@ -336,7 +467,12 @@ class HealthClient:
                         {"eventArn": event_arn, "awsAccountId": acc} for acc in batch
                     ],
                 )
-            except Exception:
+            except Exception as e:
+                record_failure(
+                    warnings,
+                    f"resources unavailable for {len(batch)} account(s) on {event_arn}",
+                    e,
+                )
                 return []
 
         batch_results = await asyncio.gather(*[_fetch_batch(b) for b in batches])

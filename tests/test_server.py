@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from aws_health_mcp.server.config import Config
 from aws_health_mcp.server.formatters import (
@@ -51,7 +52,7 @@ def test_config_defaults():
 def test_server_version():
     from aws_health_mcp.server import __version__
 
-    assert __version__ == "2.0.0"
+    assert __version__ == "2.1.0"
 
 
 class TestCompressServiceName:
@@ -241,12 +242,130 @@ class TestHealthClient:
             "failedSet": [],
         }
 
-        result1 = await client.get_event_description("arn:test")
-        result2 = await client.get_event_description("arn:test")
+        stamp = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        result1 = await client.get_event_description("arn:test", stamp)
+        result2 = await client.get_event_description("arn:test", stamp)
         assert result1 == "Test desc"
         assert result2 == "Test desc"
         # Only one API call — second hit is cached
         assert client._client.describe_event_details.call_count == 1
+
+    def _details(self, arn, text, updated):
+        return {
+            "successfulSet": [
+                {
+                    "event": {"arn": arn, "lastUpdatedTime": updated},
+                    "eventDescription": {"latestDescription": text},
+                }
+            ],
+            "failedSet": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_description_refetched_when_event_updated(self, client):
+        """An ongoing event rewrites its description; a changed lastUpdatedTime must miss."""
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+        client._client.describe_event_details.side_effect = [
+            self._details("arn:evt", "Investigating", t1),
+            self._details("arn:evt", "Mitigated, recovery in progress", t2),
+        ]
+
+        first = await client.get_event_description("arn:evt", t1)
+        second = await client.get_event_description("arn:evt", t2)
+
+        assert first == "Investigating"
+        assert second == "Mitigated, recovery in progress"
+        assert client._client.describe_event_details.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_description_cached_under_fetched_timestamp(self, client):
+        """The details response is authoritative: if the event moved on between the
+        listing and the fetch, the newer text is filed under the newer timestamp."""
+        listed = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        newer = datetime(2026, 1, 1, 12, 5, tzinfo=timezone.utc)
+        client._client.describe_event_details.return_value = self._details(
+            "arn:evt", "Newer text", newer
+        )
+
+        await client.get_event_description("arn:evt", listed)
+        # A later listing that has caught up with the newer timestamp reuses it.
+        again = await client.get_event_description("arn:evt", newer)
+
+        assert again == "Newer text"
+        assert client._client.describe_event_details.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_description_without_timestamp_is_never_served_from_cache(self, client):
+        """With no lastUpdatedTime the entry cannot be checked for staleness."""
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        client._client.describe_event_details.return_value = self._details("arn:evt", "Text", t1)
+
+        await client.get_event_description("arn:evt")
+        await client.get_event_description("arn:evt")
+        await client.get_event_descriptions_batched(["arn:evt"])
+
+        assert client._client.describe_event_details.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_failed_description_fetch_is_not_cached(self, client):
+        """The 'not available' placeholder must not stick for the whole cache TTL."""
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        client._client.describe_event_details.return_value = {
+            "successfulSet": [],
+            "failedSet": [{"eventArn": "arn:evt"}],
+        }
+        client._client.describe_event_details_for_organization.return_value = {
+            "successfulSet": [],
+            "failedSet": [],
+        }
+        assert await client.get_event_description("arn:evt", t1) == "Description not available"
+
+        client._client.describe_event_details.return_value = self._details(
+            "arn:evt", "Recovered text", t1
+        )
+        assert await client.get_event_description("arn:evt", t1) == "Recovered text"
+
+    @pytest.mark.asyncio
+    async def test_batched_descriptions_only_refetch_changed_events(self, client):
+        t1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+        texts = {"arn:a": "A v1", "arn:b": "B v1"}
+
+        def describe(eventArns):
+            return {
+                "successfulSet": [
+                    {
+                        "event": {"arn": a, "lastUpdatedTime": t1},
+                        "eventDescription": {"latestDescription": texts[a]},
+                    }
+                    for a in eventArns
+                ],
+                "failedSet": [],
+            }
+
+        client._client.describe_event_details.side_effect = describe
+        await client.get_event_descriptions_batched(["arn:a", "arn:b"], {"arn:a": t1, "arn:b": t1})
+
+        texts["arn:b"] = "B v2"
+
+        def describe_b(eventArns):
+            assert eventArns == ["arn:b"], "unchanged event A must come from cache"
+            return {
+                "successfulSet": [
+                    {
+                        "event": {"arn": "arn:b", "lastUpdatedTime": t2},
+                        "eventDescription": {"latestDescription": "B v2"},
+                    }
+                ],
+                "failedSet": [],
+            }
+
+        client._client.describe_event_details.side_effect = describe_b
+        result = await client.get_event_descriptions_batched(
+            ["arn:a", "arn:b"], {"arn:a": t1, "arn:b": t2}
+        )
+        assert result == {"arn:a": "A v1", "arn:b": "B v2"}
 
     @pytest.mark.asyncio
     async def test_get_event_descriptions_batched(self, client):
@@ -347,16 +466,16 @@ class TestServerTools:
         )
         from aws_health_mcp.server.server import get_service_events
 
-        result = await get_service_events("EC2")
-        assert "No subscription" in result
+        with pytest.raises(ToolError, match="No subscription"):
+            await get_service_events("EC2")
 
     @pytest.mark.asyncio
     async def test_get_org_health_events_no_access(self):
         self.mock_client.check_org_health_access = AsyncMock(return_value=(False, "Not enabled"))
         from aws_health_mcp.server.server import get_org_health_events
 
-        result = await get_org_health_events()
-        assert "Not enabled" in result
+        with pytest.raises(ToolError, match="Not enabled"):
+            await get_org_health_events()
 
     @pytest.mark.asyncio
     async def test_get_org_account_events_invalid_id(self):
@@ -525,7 +644,8 @@ class TestNewReadOnlyTools:
         self.mock_client.check_org_health_access = AsyncMock(return_value=(False, "Not enabled"))
         from aws_health_mcp.server.server import list_affected_accounts
 
-        assert "Not enabled" in await list_affected_accounts("arn:evt:1")
+        with pytest.raises(ToolError, match="Not enabled"):
+            await list_affected_accounts("arn:evt:1")
 
     @pytest.mark.asyncio
     async def test_list_event_types_unfiltered_returns_service_index(self):
@@ -794,11 +914,23 @@ class TestFindEntitiesForValues:
         assert len(result["arn:evt:2"]) == 1
 
     @pytest.mark.asyncio
-    async def test_batch_failure_does_not_abort_search(self, client):
+    async def test_batch_failure_is_raised_without_a_warnings_list(self, client):
+        """A throttled lookup must not read as 'no match'."""
         client._client.get_paginator.side_effect = RuntimeError("throttled")
 
-        result = await client.find_entities_for_values(["arn:evt:1"], ["i-a"])
+        with pytest.raises(RuntimeError, match="throttled"):
+            await client.find_entities_for_values(["arn:evt:1"], ["i-a"])
+
+    @pytest.mark.asyncio
+    async def test_batch_failure_is_reported_when_warnings_requested(self, client):
+        client._client.get_paginator.side_effect = RuntimeError("throttled")
+        warnings: list[str] = []
+
+        result = await client.find_entities_for_values(["arn:evt:1"], ["i-a"], warnings)
+
         assert result == {}
+        assert len(warnings) == 1
+        assert "not checked" in warnings[0] and "throttled" in warnings[0]
 
     @pytest.mark.asyncio
     async def test_discards_public_event_unknown_placeholder(self, client):
@@ -852,3 +984,320 @@ class TestToolAnnotations:
 
         names = {tool.name for tool in asyncio.run(mcp.list_tools())}
         assert not any("enable" in n or "disable" in n for n in names)
+
+
+T1 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+
+class TestPartialResults:
+    """Failed lookups must be reported, never turned into an empty answer."""
+
+    @pytest.fixture
+    def client(self):
+        from aws_health_mcp.server.client import HealthClient
+
+        c = HealthClient()
+        c._client = MagicMock()
+        return c
+
+    @staticmethod
+    def _paginator(side_effect=None, pages=None):
+        paginator = MagicMock()
+        if side_effect is not None:
+            paginator.paginate.side_effect = side_effect
+        else:
+            paginator.paginate.return_value = pages
+        return paginator
+
+    @pytest.mark.asyncio
+    async def test_affected_accounts_failure_raises_by_default(self, client):
+        client._client.get_paginator.return_value = self._paginator(RuntimeError("throttled"))
+
+        with pytest.raises(RuntimeError, match="throttled"):
+            await client.get_affected_accounts("arn:evt")
+
+    @pytest.mark.asyncio
+    async def test_affected_accounts_failure_is_noted_and_not_cached(self, client):
+        client._client.get_paginator.return_value = self._paginator(RuntimeError("throttled"))
+        warnings: list[str] = []
+
+        assert await client.get_affected_accounts("arn:evt", warnings) == []
+        assert "arn:evt" in warnings[0] and "throttled" in warnings[0]
+
+        # The failure was not cached as "no accounts": a retry reaches the API.
+        client._client.get_paginator.return_value = self._paginator(
+            pages=[{"affectedAccounts": ["111111111111"]}]
+        )
+        assert await client.get_affected_accounts("arn:evt", warnings) == ["111111111111"]
+
+    @pytest.mark.asyncio
+    async def test_org_entities_failure_raises_by_default_and_notes_when_asked(self, client):
+        client._client.get_paginator.return_value = self._paginator(RuntimeError("denied"))
+
+        with pytest.raises(RuntimeError, match="denied"):
+            await client.get_org_entities_batched("arn:evt", ["111111111111"])
+
+        warnings: list[str] = []
+        assert await client.get_org_entities_batched("arn:evt", ["111111111111"], warnings) == {}
+        assert "1 account(s)" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_description_call_failure_is_noted(self, client):
+        client._client.describe_event_details.side_effect = RuntimeError("throttled")
+        client._client.describe_event_details_for_organization.side_effect = RuntimeError("denied")
+        warnings: list[str] = []
+
+        result = await client.get_event_descriptions_batched(["arn:a", "arn:b"], None, warnings)
+
+        assert result == {
+            "arn:a": "Description not available",
+            "arn:b": "Description not available",
+        }
+        assert len(warnings) == 1
+        assert "2 event(s)" in warnings[0] and "throttled" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_description_unknown_to_the_api_is_not_a_warning(self, client):
+        """failedSet means 'AWS does not know this event', which is not a failed call."""
+        client._client.describe_event_details.return_value = {
+            "successfulSet": [],
+            "failedSet": [{"eventArn": "arn:a"}],
+        }
+        client._client.describe_event_details_for_organization.return_value = {
+            "successfulSet": [],
+            "failedSet": [],
+        }
+        warnings: list[str] = []
+
+        await client.get_event_descriptions_batched(["arn:a"], None, warnings)
+        assert warnings == []
+
+    def test_format_warnings(self):
+        from aws_health_mcp.server.formatters import format_warnings
+
+        assert format_warnings([]) == ""
+        text = format_warnings(["a", "a", "b"])
+        assert "partial results" in text
+        assert text.count("- a") == 1 and "- b" in text
+
+        many = format_warnings([f"w{i}" for i in range(8)])
+        assert "- w4" in many and "- w5" not in many and "and 3 more" in many
+
+    @pytest.mark.asyncio
+    async def test_event_listing_shows_warning_when_accounts_lookup_fails(self, client):
+        from aws_health_mcp.server.formatters import format_events_batch
+
+        client._client.describe_event_details.return_value = {
+            "successfulSet": [
+                {
+                    "event": {"arn": "arn:evt", "lastUpdatedTime": T1},
+                    "eventDescription": {"latestDescription": "Something broke"},
+                }
+            ],
+            "failedSet": [],
+        }
+        client._client.get_paginator.return_value = self._paginator(RuntimeError("throttled"))
+
+        out = await format_events_batch(
+            [{"arn": "arn:evt", "service": "EC2", "lastUpdatedTime": T1, "startTime": T1}],
+            client,
+            include_accounts=True,
+        )
+
+        assert "Something broke" in out
+        assert "partial results" in out and "arn:evt" in out
+
+    @pytest.mark.asyncio
+    async def test_event_listing_has_no_warning_when_everything_succeeds(self, client):
+        from aws_health_mcp.server.formatters import format_events_batch
+
+        client._client.describe_event_details.return_value = {
+            "successfulSet": [
+                {
+                    "event": {"arn": "arn:evt", "lastUpdatedTime": T1},
+                    "eventDescription": {"latestDescription": "Something broke"},
+                }
+            ],
+            "failedSet": [],
+        }
+        client._client.get_paginator.return_value = self._paginator(
+            pages=[{"affectedAccounts": ["111111111111"]}]
+        )
+
+        out = await format_events_batch(
+            [{"arn": "arn:evt", "service": "EC2", "lastUpdatedTime": T1, "startTime": T1}],
+            client,
+            include_accounts=True,
+        )
+        assert "partial results" not in out
+
+
+class TestToolFailureReporting:
+    @pytest.fixture(autouse=True)
+    def mock_health_client(self):
+        with patch("aws_health_mcp.server.server.health_client") as mock:
+            self.mock_client = mock
+            yield mock
+
+    @pytest.mark.asyncio
+    async def test_resource_search_with_failed_lookups_and_no_match_is_an_error(self):
+        """'Nothing affects i-123' is wrong if some events were never checked."""
+
+        async def failing(event_arns, entity_values, warnings):
+            warnings.append("resource lookup failed for 1 event(s), not checked (throttled)")
+            return {}
+
+        self.mock_client.paginate = AsyncMock(return_value=[{"arn": "arn:evt:1"}])
+        self.mock_client.find_entities_for_values = failing
+        from aws_health_mcp.server.server import find_events_for_resources
+
+        with pytest.raises(ToolError, match="Could not finish searching"):
+            await find_events_for_resources(["i-123"])
+
+    @pytest.mark.asyncio
+    async def test_resource_search_with_failed_lookups_but_a_match_warns(self):
+        async def partial(event_arns, entity_values, warnings):
+            warnings.append("resource lookup failed for 1 event(s), not checked (throttled)")
+            return {"arn:evt:1": [{"entityValue": "i-123", "statusCode": "IMPAIRED"}]}
+
+        self.mock_client.paginate = AsyncMock(
+            return_value=[
+                {"arn": "arn:evt:1", "service": "EC2", "lastUpdatedTime": T1, "startTime": T1}
+            ]
+        )
+        self.mock_client.find_entities_for_values = partial
+        self.mock_client.get_event_descriptions_batched = AsyncMock(
+            return_value={"arn:evt:1": "Instance degraded"}
+        )
+        from aws_health_mcp.server.server import find_events_for_resources
+
+        result = await find_events_for_resources(["i-123"])
+        assert "Instance degraded" in result
+        assert "partial results" in result and "throttled" in result
+
+    @pytest.mark.asyncio
+    async def test_api_failure_reaches_the_client_as_is_error(self):
+        """A raised ToolError becomes isError=True on the wire; a returned string does not."""
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from aws_health_mcp.server.server import mcp
+
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(True, None))
+        self.mock_client.get_affected_accounts = AsyncMock(side_effect=RuntimeError("throttled"))
+
+        async with create_connected_server_and_client_session(mcp._mcp_server) as session:
+            result = await session.call_tool("list_affected_accounts", {"event_arn": "arn:evt:1"})
+
+        assert result.isError is True
+        assert "throttled" in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_no_access_reaches_the_client_as_is_error(self):
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from aws_health_mcp.server.server import mcp
+
+        self.mock_client.check_health_api_access = AsyncMock(
+            return_value=(False, "No subscription")
+        )
+
+        async with create_connected_server_and_client_session(mcp._mcp_server) as session:
+            result = await session.call_tool("get_service_events", {"service": "EC2"})
+
+        assert result.isError is True
+        assert "No subscription" in result.content[0].text
+
+
+class TestServiceResolutionColdStart:
+    """A cold-start service query must not wait on a scan of every event type."""
+
+    @pytest.fixture
+    def client(self):
+        from aws_health_mcp.server.client import HealthClient
+
+        c = HealthClient()
+        c._client = MagicMock()
+        return c
+
+    def test_service_candidates(self):
+        from aws_health_mcp.server.formatters import service_candidates
+
+        assert service_candidates("EC2") == ["EC2"]
+        assert service_candidates("Kinesis Video") == ["KINESIS_VIDEO", "KINESISVIDEO"]
+        assert service_candidates("API Gateway") == ["API_GATEWAY", "APIGATEWAY"]
+        assert service_candidates("EFS")[0] == "ELASTICFILESYSTEM"
+        assert service_candidates("   ") == []
+
+    @pytest.mark.asyncio
+    async def test_confirm_service_returns_first_real_candidate(self, client):
+        def describe(filter, maxResults):
+            real = {"KINESIS_VIDEO"}
+            return {"eventTypes": [{"service": s} for s in filter["services"] if s in real]}
+
+        client._client.describe_event_types.side_effect = describe
+
+        assert await client.confirm_service(["KINESISVIDEO", "KINESIS_VIDEO"]) == "KINESIS_VIDEO"
+        assert await client.confirm_service(["NOTAREALSERVICE"]) is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_service_treats_api_failure_as_unconfirmed(self, client):
+        client._client.describe_event_types.side_effect = RuntimeError("throttled")
+        assert await client.confirm_service(["EC2"]) is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_service_remembers_confirmed_codes(self, client):
+        client._client.describe_event_types.return_value = {"eventTypes": [{"service": "EC2"}]}
+
+        await client.confirm_service(["EC2"])
+        await client.confirm_service(["EC2"])
+
+        assert client._client.describe_event_types.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_paginate_asks_for_the_maximum_page_size(self, client):
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{"eventTypes": []}]
+        client._client.get_paginator.return_value = paginator
+
+        await client.paginate("describe_event_types")
+        assert paginator.paginate.call_args.kwargs["PaginationConfig"] == {"PageSize": 100}
+
+        await client.paginate("describe_event_types", PaginationConfig={"PageSize": 10})
+        assert paginator.paginate.call_args.kwargs["PaginationConfig"] == {"PageSize": 10}
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_skips_the_full_scan_when_probe_confirms(self):
+        from aws_health_mcp.server.server import _resolve_service
+
+        with patch("aws_health_mcp.server.server.health_client") as hc:
+            hc.cached_services = MagicMock(return_value=None)
+            hc.confirm_service = AsyncMock(return_value="EC2")
+            hc.get_known_services = AsyncMock()
+
+            assert await _resolve_service("EC2") == ("EC2", "")
+            hc.get_known_services.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_falls_back_to_full_list_for_unconfirmed_names(self):
+        from aws_health_mcp.server.server import _resolve_service
+
+        with patch("aws_health_mcp.server.server.health_client") as hc:
+            hc.cached_services = MagicMock(return_value=None)
+            hc.confirm_service = AsyncMock(return_value=None)
+            hc.get_known_services = AsyncMock(return_value=KNOWN_SERVICES)
+
+            code, error = await _resolve_service("LAMBDAA")
+            assert code is None and "LAMBDA" in error
+            hc.get_known_services.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_does_not_probe_once_the_list_is_cached(self):
+        from aws_health_mcp.server.server import _resolve_service
+
+        with patch("aws_health_mcp.server.server.health_client") as hc:
+            hc.cached_services = MagicMock(return_value=KNOWN_SERVICES)
+            hc.confirm_service = AsyncMock()
+            hc.get_known_services = AsyncMock(return_value=KNOWN_SERVICES)
+
+            assert await _resolve_service("Bedrock") == ("BEDROCK", "")
+            hc.confirm_service.assert_not_called()
