@@ -12,6 +12,7 @@ aws-health-mcp-server/
 │       ├── formatters.py         # Service name resolution and markdown output
 │       └── server.py             # MCP server and tool definitions
 ├── examples/
+│   ├── .env.example              # Environment configuration template
 │   └── mcp-config.json           # MCP client configuration example
 ├── tests/
 │   └── test_server.py            # Test suite
@@ -38,7 +39,7 @@ operations (`EnableHealthServiceAccessForOrganization` and
 |---|---|
 | Account | `get_service_health`, `get_affected_entities`, `get_service_events`, `get_completed_events`, `get_scheduled_changes` |
 | Organization | `get_org_health_events`, `get_org_service_health`, `get_org_affected_entities`, `get_org_service_events`, `get_org_account_events`, `get_org_scheduled_changes`, `list_affected_accounts` |
-| Detail & aggregates | `get_event_details`, `summarize_health_events`, `count_affected_entities` |
+| Detail & aggregates | `get_event_details`, `summarize_health_events`, `count_affected_entities`, `find_events_for_resources` |
 | Discovery & diagnostics | `list_event_types`, `check_health_access` |
 
 ## Design notes
