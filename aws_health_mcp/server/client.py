@@ -59,6 +59,7 @@ class HealthClient:
     async def paginate(self, operation: str, **kwargs) -> list:
         """Paginate a Health API operation off the event loop, with concurrency control."""
         async with self._semaphore:
+
             def _sync():
                 results = []
                 paginator = self.client.get_paginator(operation)
@@ -67,14 +68,17 @@ class HealthClient:
                     if key in page:
                         results.extend(page[key])
                 return results
+
             return await asyncio.to_thread(_sync)
 
     async def call(self, operation: str, **kwargs) -> dict:
         """Call a Health API operation off the event loop, with concurrency control."""
         async with self._semaphore:
+
             def _sync():
                 method = getattr(self.client, operation)
                 return method(**kwargs)
+
             return await asyncio.to_thread(_sync)
 
     async def get_event_description(self, event_arn: str) -> str:
@@ -109,8 +113,7 @@ class HealthClient:
             return result
 
         batches = [
-            uncached_arns[i : i + BATCH_SIZE]
-            for i in range(0, len(uncached_arns), BATCH_SIZE)
+            uncached_arns[i : i + BATCH_SIZE] for i in range(0, len(uncached_arns), BATCH_SIZE)
         ]
 
         failed_arns: list[str] = []
@@ -140,8 +143,7 @@ class HealthClient:
         remaining = [arn for arn in failed_arns if arn not in result]
         if remaining:
             org_batches = [
-                remaining[i : i + BATCH_SIZE]
-                for i in range(0, len(remaining), BATCH_SIZE)
+                remaining[i : i + BATCH_SIZE] for i in range(0, len(remaining), BATCH_SIZE)
             ]
 
             async def _fetch_org_batch(batch: list[str]) -> dict[str, str]:
@@ -239,10 +241,7 @@ class HealthClient:
         Returns a dict mapping account_id -> list of entities.
         """
         BATCH_SIZE = 10
-        batches = [
-            account_ids[i : i + BATCH_SIZE]
-            for i in range(0, len(account_ids), BATCH_SIZE)
-        ]
+        batches = [account_ids[i : i + BATCH_SIZE] for i in range(0, len(account_ids), BATCH_SIZE)]
 
         async def _fetch_batch(batch: list[str]) -> list:
             try:

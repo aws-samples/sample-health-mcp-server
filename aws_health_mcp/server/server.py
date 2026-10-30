@@ -78,10 +78,7 @@ async def get_affected_entities() -> str:
 
             header = format_event(event, desc)
             lines = [header, "", "**Affected Entities:**", ""]
-            lines.append(
-                "Summary: "
-                + ", ".join(f"{s}: {c}" for s, c in status_count.items())
-            )
+            lines.append("Summary: " + ", ".join(f"{s}: {c}" for s, c in status_count.items()))
             for status, status_entities in entities_by_status.items():
                 lines.append(f"\n### {status.upper()} ({len(status_entities)})")
                 for entity in status_entities:
@@ -262,6 +259,7 @@ async def get_org_health_events(
             return "No organization health events found."
 
         if account_id:
+
             async def _is_affected(event: dict) -> bool:
                 accounts = await health_client.get_affected_accounts(event["arn"])
                 return account_id in accounts
@@ -365,7 +363,9 @@ async def get_org_affected_entities(
             header = format_event(event, desc, affected_accounts)
             entity_lines = [header, "", "**Affected Entities:**"]
 
-            account_entities = await health_client.get_org_entities_batched(evt_arn, target_accounts)
+            account_entities = await health_client.get_org_entities_batched(
+                evt_arn, target_accounts
+            )
 
             for acc, entities in account_entities.items():
                 if not entities:
