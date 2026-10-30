@@ -14,6 +14,7 @@ from .formatters import (
     format_events_batch,
     format_timestamp,
     format_warnings,
+    service_candidates,
     validate_service_name,
 )
 
@@ -36,6 +37,15 @@ async def _resolve_service(service: str) -> tuple[str | None, str]:
     Returns ``(service_code, "")`` on success, or ``(None, error_message)`` with
     a message that suggests a real alternative where one plausibly exists.
     """
+    # Scanning every event type to build the full list can take several seconds
+    # on a cold start. Common names are confirmed with a single cheap probe first;
+    # the full list is only needed for names that don't resolve that way (typos,
+    # unusual spellings) so a suggestion can be offered.
+    if health_client.cached_services() is None:
+        confirmed = await health_client.confirm_service(service_candidates(service))
+        if confirmed:
+            return confirmed, ""
+
     known = await health_client.get_known_services()
     is_valid, resolved = validate_service_name(service, known)
     if is_valid:

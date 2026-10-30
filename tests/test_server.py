@@ -1206,3 +1206,98 @@ class TestToolFailureReporting:
 
         assert result.isError is True
         assert "No subscription" in result.content[0].text
+
+
+class TestServiceResolutionColdStart:
+    """A cold-start service query must not wait on a scan of every event type."""
+
+    @pytest.fixture
+    def client(self):
+        from aws_health_mcp.server.client import HealthClient
+
+        c = HealthClient()
+        c._client = MagicMock()
+        return c
+
+    def test_service_candidates(self):
+        from aws_health_mcp.server.formatters import service_candidates
+
+        assert service_candidates("EC2") == ["EC2"]
+        assert service_candidates("Kinesis Video") == ["KINESIS_VIDEO", "KINESISVIDEO"]
+        assert service_candidates("API Gateway") == ["API_GATEWAY", "APIGATEWAY"]
+        assert service_candidates("EFS")[0] == "ELASTICFILESYSTEM"
+        assert service_candidates("   ") == []
+
+    @pytest.mark.asyncio
+    async def test_confirm_service_returns_first_real_candidate(self, client):
+        def describe(filter, maxResults):
+            real = {"KINESIS_VIDEO"}
+            return {"eventTypes": [{"service": s} for s in filter["services"] if s in real]}
+
+        client._client.describe_event_types.side_effect = describe
+
+        assert await client.confirm_service(["KINESISVIDEO", "KINESIS_VIDEO"]) == "KINESIS_VIDEO"
+        assert await client.confirm_service(["NOTAREALSERVICE"]) is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_service_treats_api_failure_as_unconfirmed(self, client):
+        client._client.describe_event_types.side_effect = RuntimeError("throttled")
+        assert await client.confirm_service(["EC2"]) is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_service_remembers_confirmed_codes(self, client):
+        client._client.describe_event_types.return_value = {"eventTypes": [{"service": "EC2"}]}
+
+        await client.confirm_service(["EC2"])
+        await client.confirm_service(["EC2"])
+
+        assert client._client.describe_event_types.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_paginate_asks_for_the_maximum_page_size(self, client):
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{"eventTypes": []}]
+        client._client.get_paginator.return_value = paginator
+
+        await client.paginate("describe_event_types")
+        assert paginator.paginate.call_args.kwargs["PaginationConfig"] == {"PageSize": 100}
+
+        await client.paginate("describe_event_types", PaginationConfig={"PageSize": 10})
+        assert paginator.paginate.call_args.kwargs["PaginationConfig"] == {"PageSize": 10}
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_skips_the_full_scan_when_probe_confirms(self):
+        from aws_health_mcp.server.server import _resolve_service
+
+        with patch("aws_health_mcp.server.server.health_client") as hc:
+            hc.cached_services = MagicMock(return_value=None)
+            hc.confirm_service = AsyncMock(return_value="EC2")
+            hc.get_known_services = AsyncMock()
+
+            assert await _resolve_service("EC2") == ("EC2", "")
+            hc.get_known_services.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_falls_back_to_full_list_for_unconfirmed_names(self):
+        from aws_health_mcp.server.server import _resolve_service
+
+        with patch("aws_health_mcp.server.server.health_client") as hc:
+            hc.cached_services = MagicMock(return_value=None)
+            hc.confirm_service = AsyncMock(return_value=None)
+            hc.get_known_services = AsyncMock(return_value=KNOWN_SERVICES)
+
+            code, error = await _resolve_service("LAMBDAA")
+            assert code is None and "LAMBDA" in error
+            hc.get_known_services.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_does_not_probe_once_the_list_is_cached(self):
+        from aws_health_mcp.server.server import _resolve_service
+
+        with patch("aws_health_mcp.server.server.health_client") as hc:
+            hc.cached_services = MagicMock(return_value=KNOWN_SERVICES)
+            hc.confirm_service = AsyncMock()
+            hc.get_known_services = AsyncMock(return_value=KNOWN_SERVICES)
+
+            assert await _resolve_service("Bedrock") == ("BEDROCK", "")
+            hc.confirm_service.assert_not_called()

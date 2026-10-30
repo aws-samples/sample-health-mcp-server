@@ -28,6 +28,25 @@ def compress_service_name(service: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", service.upper())
 
 
+def service_candidates(service: str) -> list[str]:
+    """Plausible Health service codes for a user-supplied name, most likely first.
+
+    Used to confirm a name with a cheap API probe before falling back to the full
+    service list: the alias target, the name with separators as underscores
+    ("Kinesis Video" -> KINESIS_VIDEO), and the fully compressed form
+    ("API Gateway" -> APIGATEWAY).
+    """
+    compressed = compress_service_name(service)
+    if not compressed:
+        return []
+    candidates = [
+        SERVICE_ALIASES.get(compressed),
+        re.sub(r"[^A-Z0-9]+", "_", service.upper()).strip("_"),
+        compressed,
+    ]
+    return list(dict.fromkeys(c for c in candidates if c))
+
+
 def validate_service_name(
     service: str, known_services: Optional[Iterable[str]] = None
 ) -> tuple[bool, str]:

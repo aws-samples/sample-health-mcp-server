@@ -98,6 +98,10 @@ class HealthClient:
 
     async def paginate(self, operation: str, **kwargs) -> list:
         """Paginate a Health API operation off the event loop, with concurrency control."""
+        # The Health API returns only 10 items per page unless asked for more
+        # (100 is the maximum on every paginated operation used here). The default
+        # turned DescribeEventTypes alone into ~275 sequential requests.
+        kwargs.setdefault("PaginationConfig", {"PageSize": 100})
         async with self._semaphore:
 
             def _sync():
@@ -133,6 +137,40 @@ class HealthClient:
         except Exception as e:
             logger.warning("Could not resolve AWS caller identity: %s", e)
             return None
+
+    def cached_services(self) -> Optional[list[str]]:
+        """The full service list if it has already been loaded, without any API call."""
+        return self._cache_get(_SERVICES_CACHE_KEY, ttl=Config.SERVICE_LIST_TTL)
+
+    async def confirm_service(self, candidates: list[str]) -> Optional[str]:
+        """Return the first of ``candidates`` that is a real Health service code, else None.
+
+        One small DescribeEventTypes call per candidate, run concurrently. This lets
+        a common name like "EC2" or "Bedrock" resolve in well under a second instead
+        of waiting for the full service list (see get_known_services). A failed
+        probe counts as "not confirmed", never as "does not exist".
+        """
+
+        async def _probe(code: str) -> Optional[str]:
+            key = f"service_ok:{code}"
+            if self._cache_get(key, ttl=Config.SERVICE_LIST_TTL):
+                return code
+            try:
+                response = await self.call(
+                    "describe_event_types", filter={"services": [code]}, maxResults=10
+                )
+            except Exception as e:
+                logger.debug("Service probe for %s failed: %s", code, e)
+                return None
+            if not response.get("eventTypes"):
+                return None
+            self._cache_set(key, True)
+            return code
+
+        for code in await asyncio.gather(*[_probe(c) for c in candidates]):
+            if code:
+                return code
+        return None
 
     async def get_known_services(self) -> Optional[list[str]]:
         """Return every service code AWS Health knows about, or None if unavailable.
