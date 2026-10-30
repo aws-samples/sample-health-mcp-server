@@ -591,13 +591,256 @@ class TestNewReadOnlyTools:
         assert "enable-health-service-access-for-organization" in result
 
 
+class TestScopingFilters:
+    @pytest.fixture(autouse=True)
+    def mock_health_client(self):
+        with patch("aws_health_mcp.server.server.health_client") as mock:
+            self.mock_client = mock
+            yield mock
+
+    def _sent_filter(self):
+        return self.mock_client.paginate.await_args.kwargs["filter"]
+
+    @pytest.mark.asyncio
+    async def test_regions_filter_passed_through(self):
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_service_health
+
+        await get_service_health(regions=["us-west-2", "eu-west-1"])
+        assert self._sent_filter()["regions"] == ["us-west-2", "eu-west-1"]
+
+    @pytest.mark.asyncio
+    async def test_event_listing_never_sends_tags_or_entity_values(self):
+        """Neither filter works as expected on DescribeEvents.
+
+        A live check showed `tags` is ignored outright (a nonsense tag key still
+        returned all 48 events) and `entityValues` also matches events with no
+        entities (a bogus resource ID still returned 2). Sending either would
+        make the tool confidently wrong, so resource scoping lives in
+        find_events_for_resources instead.
+        """
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_service_health
+
+        await get_service_health(regions=["us-east-1"])
+        sent = self._sent_filter()
+        assert "tags" not in sent
+        assert "entityValues" not in sent
+
+    @pytest.mark.asyncio
+    async def test_no_filters_means_no_extra_keys(self):
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_service_health
+
+        await get_service_health()
+        assert set(self._sent_filter()) == {"eventStatusCodes"}
+
+    @pytest.mark.asyncio
+    async def test_scheduled_changes_accepts_filters(self):
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_scheduled_changes
+
+        await get_scheduled_changes(regions=["ap-southeast-2"])
+        sent = self._sent_filter()
+        assert sent["regions"] == ["ap-southeast-2"]
+        assert sent["eventTypeCategories"] == ["scheduledChange"]
+
+    @pytest.mark.asyncio
+    async def test_org_account_filter_is_server_side(self):
+        """awsAccountIds replaces one DescribeAffectedAccounts call per event."""
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(True, None))
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_org_account_events
+
+        await get_org_account_events("123456789012")
+        assert self._sent_filter()["awsAccountIds"] == ["123456789012"]
+        self.mock_client.get_affected_accounts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_org_health_events_account_filter_is_server_side(self):
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(True, None))
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_org_health_events
+
+        await get_org_health_events(account_id="123456789012")
+        assert self._sent_filter()["awsAccountIds"] == ["123456789012"]
+        self.mock_client.get_affected_accounts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_org_health_events_rejects_bad_account_id(self):
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(True, None))
+        from aws_health_mcp.server.server import get_org_health_events
+
+        assert "Invalid account ID" in await get_org_health_events(account_id="123")
+
+    @pytest.mark.asyncio
+    async def test_org_tools_never_send_tags(self):
+        """OrganizationEventFilter has no tag support at all."""
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(True, None))
+        self.mock_client.get_known_services = AsyncMock(return_value=["EC2"])
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import get_org_service_events
+
+        await get_org_service_events("EC2", regions=["us-east-1"])
+        assert "tags" not in self._sent_filter()
+
+
+class TestFindEventsForResources:
+    @pytest.fixture(autouse=True)
+    def mock_health_client(self):
+        with patch("aws_health_mcp.server.server.health_client") as mock:
+            self.mock_client = mock
+            yield mock
+
+    @pytest.mark.asyncio
+    async def test_empty_input(self):
+        from aws_health_mcp.server.server import find_events_for_resources
+
+        assert "No resource identifiers provided" in await find_events_for_resources([])
+
+    @pytest.mark.asyncio
+    async def test_reports_no_match_without_claiming_events_exist(self):
+        self.mock_client.paginate = AsyncMock(return_value=[{"arn": "arn:evt:1"}])
+        self.mock_client.find_entities_for_values = AsyncMock(return_value={})
+        from aws_health_mcp.server.server import find_events_for_resources
+
+        result = await find_events_for_resources(["i-000nonexistent"])
+        assert "No health events affect i-000nonexistent" in result
+        assert "searched 1 events" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_matching_event_and_resource(self):
+        self.mock_client.paginate = AsyncMock(
+            return_value=[
+                {
+                    "arn": "arn:evt:1",
+                    "service": "ECS",
+                    "eventTypeCode": "AWS_ECS_TASK_PATCHING_RETIREMENT",
+                    "statusCode": "upcoming",
+                    "region": "us-west-2",
+                },
+                {"arn": "arn:evt:2", "service": "RDS"},
+            ]
+        )
+        self.mock_client.find_entities_for_values = AsyncMock(
+            return_value={"arn:evt:1": [{"entityValue": "my-cluster"}]}
+        )
+        self.mock_client.get_event_descriptions_batched = AsyncMock(
+            return_value={"arn:evt:1": "Tasks will be replaced"}
+        )
+        from aws_health_mcp.server.server import find_events_for_resources
+
+        result = await find_events_for_resources(["my-cluster"])
+        assert "**1 event(s)** affect" in result
+        assert "AWS_ECS_TASK_PATCHING_RETIREMENT" in result
+        assert "my-cluster" in result
+        # The non-matching event must not leak into the answer
+        assert "RDS" not in result
+
+    @pytest.mark.asyncio
+    async def test_no_events_at_all(self):
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import find_events_for_resources
+
+        assert "No health events to search" in await find_events_for_resources(["i-abc"])
+
+
+class TestFindEntitiesForValues:
+    @pytest.fixture
+    def client(self):
+        from aws_health_mcp.server.client import HealthClient
+
+        c = HealthClient()
+        c._client = MagicMock()
+        return c
+
+    @pytest.mark.asyncio
+    async def test_batches_event_arns_by_ten(self, client):
+        """DescribeAffectedEntities rejects more than 10 eventArns per call."""
+        arns = [f"arn:evt:{i}" for i in range(25)]
+        seen_batches = []
+
+        mock_paginator = MagicMock()
+
+        def paginate(**kwargs):
+            seen_batches.append(kwargs["filter"]["eventArns"])
+            return [{"entities": []}]
+
+        mock_paginator.paginate.side_effect = paginate
+        client._client.get_paginator.return_value = mock_paginator
+
+        await client.find_entities_for_values(arns, ["i-abc"])
+        assert len(seen_batches) == 3
+        assert all(len(b) <= 10 for b in seen_batches)
+
+    @pytest.mark.asyncio
+    async def test_groups_entities_by_event_arn(self, client):
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {
+                "entities": [
+                    {"eventArn": "arn:evt:1", "entityValue": "i-a"},
+                    {"eventArn": "arn:evt:1", "entityValue": "i-b"},
+                    {"eventArn": "arn:evt:2", "entityValue": "i-c"},
+                ]
+            }
+        ]
+        client._client.get_paginator.return_value = mock_paginator
+
+        result = await client.find_entities_for_values(
+            ["arn:evt:1", "arn:evt:2"], ["i-a", "i-b", "i-c"]
+        )
+        assert len(result["arn:evt:1"]) == 2
+        assert len(result["arn:evt:2"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_batch_failure_does_not_abort_search(self, client):
+        client._client.get_paginator.side_effect = RuntimeError("throttled")
+
+        result = await client.find_entities_for_values(["arn:evt:1"], ["i-a"])
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_discards_public_event_unknown_placeholder(self, client):
+        """PUBLIC events return entityValue 'UNKNOWN' regardless of the filter.
+
+        Trusting the API filter here reported 2 matching events for a resource
+        ID that exists nowhere.
+        """
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {
+                "entities": [
+                    {"eventArn": "arn:public:1", "entityValue": "UNKNOWN"},
+                    {"eventArn": "arn:evt:1", "entityValue": "i-a"},
+                ]
+            }
+        ]
+        client._client.get_paginator.return_value = mock_paginator
+
+        result = await client.find_entities_for_values(["arn:public:1", "arn:evt:1"], ["i-a"])
+        assert "arn:public:1" not in result
+        assert result["arn:evt:1"][0]["entityValue"] == "i-a"
+
+    @pytest.mark.asyncio
+    async def test_match_is_case_insensitive(self, client):
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {"entities": [{"eventArn": "arn:evt:1", "entityValue": "My-Cluster"}]}
+        ]
+        client._client.get_paginator.return_value = mock_paginator
+
+        result = await client.find_entities_for_values(["arn:evt:1"], ["my-cluster"])
+        assert "arn:evt:1" in result
+
+
 class TestToolAnnotations:
     def test_all_tools_declared_read_only(self):
         """No tool here mutates; clients should be able to see that."""
         from aws_health_mcp.server.server import mcp
 
         tools = asyncio.run(mcp.list_tools())
-        assert len(tools) == 17
+        assert len(tools) == 18
         for tool in tools:
             assert tool.annotations is not None, f"{tool.name} has no annotations"
             assert tool.annotations.readOnlyHint is True, f"{tool.name} not read-only"

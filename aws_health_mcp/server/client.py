@@ -273,6 +273,48 @@ class HealthClient:
         self._cache_set(cache_key, accounts)
         return accounts
 
+    async def find_entities_for_values(
+        self, event_arns: list[str], entity_values: list[str]
+    ) -> dict[str, list]:
+        """Find which of ``event_arns`` affect any of ``entity_values``.
+
+        DescribeAffectedEntities caps eventArns at 10 per call, so ARNs are
+        batched and the batches run concurrently under the semaphore.
+
+        The API's entityValues filter cannot be trusted on its own: PUBLIC-scope
+        events (e.g. AWS_MULTIPLE_SERVICES_OPERATIONAL_ISSUE) return a
+        placeholder entity with entityValue "UNKNOWN" whatever was asked for, so
+        a resource ID that exists nowhere would still appear to match. Results
+        are re-checked against the requested values here.
+
+        Returns a dict of event ARN -> matching entities, omitting events with
+        no match.
+        """
+        BATCH_SIZE = 10
+        batches = [event_arns[i : i + BATCH_SIZE] for i in range(0, len(event_arns), BATCH_SIZE)]
+        wanted = {value.casefold() for value in entity_values}
+
+        async def _fetch_batch(batch: list[str]) -> list:
+            try:
+                return await self.paginate(
+                    "describe_affected_entities",
+                    filter={"eventArns": batch, "entityValues": entity_values},
+                )
+            except Exception as e:
+                logger.warning("Entity lookup failed for a batch of %d: %s", len(batch), e)
+                return []
+
+        batch_results = await asyncio.gather(*[_fetch_batch(b) for b in batches])
+
+        result: dict[str, list] = {}
+        for entities in batch_results:
+            for entity in entities:
+                arn = entity.get("eventArn")
+                value = entity.get("entityValue", "")
+                if arn and value.casefold() in wanted:
+                    result.setdefault(arn, []).append(entity)
+        return result
+
     async def get_org_entities_batched(
         self, event_arn: str, account_ids: list[str]
     ) -> dict[str, list]:

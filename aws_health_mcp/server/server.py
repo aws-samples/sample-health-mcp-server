@@ -1,6 +1,5 @@
 """Main MCP server implementation for AWS Health API."""
 
-import asyncio
 from datetime import datetime, timezone
 
 from botocore.exceptions import ClientError
@@ -50,21 +49,40 @@ async def _resolve_service(service: str) -> tuple[str | None, str]:
     return None, f"Unknown AWS service: {service}.{hint}"
 
 
+def _apply_filters(filter_params: dict, regions: list[str] | None = None) -> dict:
+    """Add optional region scoping to a Health API event filter.
+
+    Only ``regions`` is applied here. EventFilter also accepts ``tags`` and
+    ``entityValues``, but neither behaves as a caller would expect on
+    DescribeEvents: ``tags`` is ignored outright, and ``entityValues`` also
+    matches events that have no entities, so a resource ID that exists nowhere
+    still returns events. Resource scoping is done in find_events_for_resources,
+    which filters through DescribeAffectedEntities where the match is exact.
+    """
+    if regions:
+        filter_params["regions"] = regions
+    return filter_params
+
+
 @mcp.tool(annotations=_READ_ONLY)
-async def get_service_health() -> str:
+async def get_service_health(regions: list[str] | None = None) -> str:
     """Get current AWS service health events.
 
     Returns active and upcoming AWS health events with descriptions and timelines.
+    Consider summarize_health_events first: this returns full descriptions and
+    can be very large on a busy account.
+
+    Args:
+        regions: Optional. Restrict to these AWS regions, e.g. ['us-west-2'].
 
     Example prompts:
     - "Show me all current AWS service health issues"
-    - "What's the current status of AWS services?"
+    - "What's broken in us-west-2?"
     - "Are there any active AWS service disruptions?"
     """
     try:
-        events = await health_client.paginate(
-            "describe_events", filter={"eventStatusCodes": ["open", "upcoming"]}
-        )
+        filter_params = _apply_filters({"eventStatusCodes": ["open", "upcoming"]}, regions)
+        events = await health_client.paginate("describe_events", filter=filter_params)
         if not events:
             return "No active AWS health events found."
         return await format_events_batch(events, health_client)
@@ -127,15 +145,17 @@ async def get_affected_entities() -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-async def get_service_events(service: str) -> str:
+async def get_service_events(service: str, regions: list[str] | None = None) -> str:
     """Get health events for a specific AWS service.
 
     Args:
         service: The AWS service name (e.g., 'EC2', 'RDS', 'LAMBDA'). Case insensitive.
+            Use list_event_types to discover the codes AWS Health uses.
+        regions: Optional. Restrict to these AWS regions, e.g. ['us-west-2'].
 
     Example prompts:
     - "What's happening with EC2 right now?"
-    - "Show me all RDS issues"
+    - "Any RDS issues in eu-west-1?"
     - "Are there any problems with S3?"
     """
     try:
@@ -147,10 +167,11 @@ async def get_service_events(service: str) -> str:
         if not normalized_service:
             return error
 
-        events = await health_client.paginate(
-            "describe_events",
-            filter={"eventStatusCodes": ["open", "upcoming"], "services": [normalized_service]},
+        filter_params = _apply_filters(
+            {"eventStatusCodes": ["open", "upcoming"], "services": [normalized_service]},
+            regions,
         )
+        events = await health_client.paginate("describe_events", filter=filter_params)
         if not events:
             return f"No active health events found for service: {normalized_service}"
         return await format_events_batch(events, health_client)
@@ -164,15 +185,16 @@ async def get_service_events(service: str) -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-async def get_completed_events(service: str | None = None) -> str:
+async def get_completed_events(service: str | None = None, regions: list[str] | None = None) -> str:
     """Get completed/closed health events.
 
     Args:
         service: Optional. The AWS service name to filter by. Case insensitive.
+        regions: Optional. Restrict to these AWS regions, e.g. ['us-west-2'].
 
     Example prompts:
     - "Show me recently resolved AWS issues"
-    - "What EC2 problems were fixed?"
+    - "What EC2 problems were fixed in us-east-1?"
     - "Get history of resolved incidents"
     """
     try:
@@ -189,6 +211,7 @@ async def get_completed_events(service: str | None = None) -> str:
                 return error
             filter_params["services"] = [normalized_service]
 
+        _apply_filters(filter_params, regions)
         events = await health_client.paginate("describe_events", filter=filter_params)
         if not events:
             svc = f" for service: {normalized_service}" if normalized_service else ""
@@ -204,24 +227,28 @@ async def get_completed_events(service: str | None = None) -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-async def get_scheduled_changes() -> str:
+async def get_scheduled_changes(regions: list[str] | None = None) -> str:
     """Get all scheduled changes/maintenance events across AWS services.
 
     Returns upcoming maintenance windows, planned updates, and infrastructure improvements.
 
+    Args:
+        regions: Optional. Restrict to these AWS regions, e.g. ['us-west-2'].
+
     Example prompts:
     - "What maintenance is planned for AWS services?"
-    - "Show me upcoming AWS changes"
+    - "Any upcoming maintenance in eu-west-1?"
     - "When is the next AWS maintenance?"
     """
     try:
-        events = await health_client.paginate(
-            "describe_events",
-            filter={
+        filter_params = _apply_filters(
+            {
                 "eventTypeCategories": ["scheduledChange"],
                 "eventStatusCodes": ["open", "upcoming"],
             },
+            regions,
         )
+        events = await health_client.paginate("describe_events", filter=filter_params)
         if not events:
             return "No scheduled changes found."
 
@@ -244,7 +271,10 @@ async def get_scheduled_changes() -> str:
 
 @mcp.tool(annotations=_READ_ONLY)
 async def get_org_health_events(
-    service: str | None = None, account_id: str | None = None, status: str = "active"
+    service: str | None = None,
+    account_id: str | None = None,
+    status: str = "active",
+    regions: list[str] | None = None,
 ) -> str:
     """Get health events across your AWS Organization.
 
@@ -254,11 +284,12 @@ async def get_org_health_events(
         service: Optional. The AWS service name to filter by. Case insensitive.
         account_id: Optional. The AWS account ID to filter events for.
         status: Optional. 'active' (default) or 'closed'.
+        regions: Optional. Restrict to these AWS regions, e.g. ['us-west-2'].
 
     Example prompts:
     - "Show me org-wide AWS health events"
     - "What issues affect account 123456789012?"
-    - "Get closed org health events for RDS"
+    - "Any org-wide events in ap-southeast-2?"
     """
     try:
         has_access, error_message = await health_client.check_org_health_access()
@@ -281,22 +312,22 @@ async def get_org_health_events(
                 return error
             filter_params["services"] = [normalized_service]
 
+        if account_id:
+            if not account_id.isdigit() or len(account_id) != 12:
+                return f"Invalid account ID: {account_id}. Must be a 12-digit number."
+            # OrganizationEventFilter supports awsAccountIds, so AWS filters
+            # server-side. Previously this fetched every org event and then made
+            # one DescribeAffectedAccountsForOrganization call per event.
+            filter_params["awsAccountIds"] = [account_id]
+
+        _apply_filters(filter_params, regions)
         events = await health_client.paginate(
             "describe_events_for_organization", filter=filter_params
         )
         if not events:
-            return "No organization health events found."
-
-        if account_id:
-
-            async def _is_affected(event: dict) -> bool:
-                accounts = await health_client.get_affected_accounts(event["arn"])
-                return account_id in accounts
-
-            checks = await asyncio.gather(*[_is_affected(e) for e in events])
-            events = [e for e, affected in zip(events, checks) if affected]
-            if not events:
+            if account_id:
                 return f"No organization health events found for account {account_id}."
+            return "No organization health events found."
 
         return await format_events_batch(events, health_client, include_accounts=True)
 
@@ -425,11 +456,12 @@ async def get_org_affected_entities(
 
 
 @mcp.tool(annotations=_READ_ONLY)
-async def get_org_service_events(service: str) -> str:
+async def get_org_service_events(service: str, regions: list[str] | None = None) -> str:
     """Get health events for a specific AWS service across your organization.
 
     Args:
         service: The AWS service name (e.g., 'EC2', 'RDS', 'LAMBDA'). Case insensitive.
+        regions: Optional. Restrict to these AWS regions, e.g. ['us-west-2'].
 
     Example prompts:
     - "What's happening with EC2 across my organization?"
@@ -444,9 +476,12 @@ async def get_org_service_events(service: str) -> str:
         if not normalized_service:
             return error
 
+        filter_params = _apply_filters(
+            {"eventStatusCodes": ["open", "upcoming"], "services": [normalized_service]},
+            regions,
+        )
         events = await health_client.paginate(
-            "describe_events_for_organization",
-            filter={"eventStatusCodes": ["open", "upcoming"], "services": [normalized_service]},
+            "describe_events_for_organization", filter=filter_params
         )
         if not events:
             return f"No active health events for {normalized_service} across your organization."
@@ -461,11 +496,12 @@ async def get_org_service_events(service: str) -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
-async def get_org_account_events(account_id: str) -> str:
+async def get_org_account_events(account_id: str, regions: list[str] | None = None) -> str:
     """Get health events for a specific AWS account in your organization.
 
     Args:
         account_id: The 12-digit AWS account ID.
+        regions: Optional. Restrict to these AWS regions, e.g. ['us-west-2'].
 
     Example prompts:
     - "What health events are affecting account 123456789012?"
@@ -479,20 +515,15 @@ async def get_org_account_events(account_id: str) -> str:
         if not account_id.isdigit() or len(account_id) != 12:
             return f"Invalid account ID: {account_id}. Must be a 12-digit number."
 
-        events = await health_client.paginate(
-            "describe_events_for_organization",
-            filter={"eventStatusCodes": ["open", "upcoming"]},
+        # awsAccountIds filters server-side; this used to fetch every org event
+        # and then call DescribeAffectedAccountsForOrganization once per event.
+        filter_params = _apply_filters(
+            {"eventStatusCodes": ["open", "upcoming"], "awsAccountIds": [account_id]},
+            regions,
         )
-        if not events:
-            return "No active health events found across your organization."
-
-        async def _is_affected(event: dict) -> bool:
-            accounts = await health_client.get_affected_accounts(event["arn"])
-            return account_id in accounts
-
-        checks = await asyncio.gather(*[_is_affected(e) for e in events])
-        account_events = [e for e, affected in zip(events, checks) if affected]
-
+        account_events = await health_client.paginate(
+            "describe_events_for_organization", filter=filter_params
+        )
         if not account_events:
             return f"No active health events found for account {account_id}."
 
@@ -844,6 +875,68 @@ async def list_event_types(service: str | None = None, category: str | None = No
         return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
     except Exception as e:
         return f"Error listing event types: {str(e)}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def find_events_for_resources(entity_values: list[str], include_closed: bool = False) -> str:
+    """Find which health events affect specific resources of yours.
+
+    Answers "is my instance / cluster / database affected by anything?".
+
+    Matching goes through DescribeAffectedEntities, where entity values match
+    exactly. The equivalent filter on DescribeEvents cannot be used for this:
+    it also returns events that have no entities at all, so a resource ID that
+    exists nowhere still comes back with matches.
+
+    Args:
+        entity_values: Resource identifiers, e.g. ['i-1234567890abcdef0'].
+        include_closed: Also search resolved events, not just open/upcoming.
+
+    Example prompts:
+    - "Is i-1234567890abcdef0 affected by any AWS issue?"
+    - "Do any current events touch my cluster my-prod-cluster?"
+    """
+    try:
+        if not entity_values:
+            return "No resource identifiers provided."
+
+        status_codes = ["open", "upcoming"]
+        if include_closed:
+            status_codes.append("closed")
+
+        events = await health_client.paginate(
+            "describe_events", filter={"eventStatusCodes": status_codes}
+        )
+        if not events:
+            return "No health events to search."
+
+        events_by_arn = {e["arn"]: e for e in events if e.get("arn")}
+        matches = await health_client.find_entities_for_values(list(events_by_arn), entity_values)
+        if not matches:
+            searched = ", ".join(entity_values)
+            return f"No health events affect {searched} " f"(searched {len(events_by_arn)} events)."
+
+        descriptions = await health_client.get_event_descriptions_batched(list(matches))
+
+        sections = []
+        for arn, entities in matches.items():
+            event = events_by_arn.get(arn, {"arn": arn})
+            body = format_event(event, descriptions.get(arn, "No description available"))
+            lines = [body, "", "**Your matching resources:**"]
+            lines.extend(format_entity(entity) for entity in entities)
+            lines.append(f"\n**ARN:** `{arn}`")
+            sections.append("\n".join(lines))
+
+        header = (
+            f"**{len(matches)} event(s)** affect the {len(entity_values)} "
+            f"resource(s) you asked about.\n"
+        )
+        return header + "\n\n---\n\n".join(sections)
+
+    except ClientError as e:
+        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+    except Exception as e:
+        return f"Error searching events for resources: {str(e)}"
 
 
 @mcp.tool(annotations=_READ_ONLY)
