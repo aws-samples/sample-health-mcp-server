@@ -139,6 +139,22 @@ def format_entity(entity: dict) -> str:
     return f"- {value}{suffix}"
 
 
+def format_warnings(warnings: list[str]) -> str:
+    """Footer for output built from partial data; empty when every lookup succeeded."""
+    if not warnings:
+        return ""
+    unique = list(dict.fromkeys(warnings))
+    lines = [
+        "",
+        "---",
+        "**Warning: partial results.** Some lookups failed, so the above may be incomplete:",
+    ]
+    lines.extend(f"- {w}" for w in unique[:5])
+    if len(unique) > 5:
+        lines.append(f"- ... and {len(unique) - 5} more")
+    return "\n\n" + "\n".join(lines)
+
+
 async def format_events_batch(
     events: list[dict], client: "HealthClient", include_accounts: bool = False
 ) -> str:
@@ -150,15 +166,16 @@ async def format_events_batch(
     valid_arns = [a for a in arns if a]
 
     # Single batched call for all descriptions (10 ARNs per API call)
+    warnings: list[str] = []
     descriptions = await client.get_event_descriptions_batched(
-        valid_arns, last_updated_by_arn(events)
+        valid_arns, last_updated_by_arn(events), warnings
     )
 
     # Fetch accounts in parallel if needed
     accounts_map: dict[str, list[str]] = {}
     if include_accounts:
         account_results = await asyncio.gather(
-            *[client.get_affected_accounts(arn) for arn in valid_arns]
+            *[client.get_affected_accounts(arn, warnings) for arn in valid_arns]
         )
         accounts_map = dict(zip(valid_arns, account_results))
 
@@ -169,4 +186,4 @@ async def format_events_batch(
         accounts = accounts_map.get(arn) if include_accounts else None
         formatted.append(format_event(event, desc, accounts))
 
-    return "\n\n---\n\n".join(formatted)
+    return "\n\n---\n\n".join(formatted) + format_warnings(warnings)

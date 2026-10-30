@@ -4,14 +4,16 @@ from datetime import datetime, timezone
 
 from botocore.exceptions import ClientError
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from .client import health_client, last_updated_by_arn
+from .client import health_client, last_updated_by_arn, record_failure
 from .formatters import (
     format_entity,
     format_event,
     format_events_batch,
     format_timestamp,
+    format_warnings,
     validate_service_name,
 )
 
@@ -86,8 +88,10 @@ async def get_service_health(regions: list[str] | None = None) -> str:
         if not events:
             return "No active AWS health events found."
         return await format_events_batch(events, health_client)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching AWS health events: {str(e)}"
+        raise ToolError(f"Error fetching AWS health events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -109,10 +113,11 @@ async def get_affected_entities() -> str:
             return "No open health events found."
 
         sections = []
+        warnings: list[str] = []
         for event in events:
             event_arn = event["arn"]
             desc = await health_client.get_event_description(
-                event_arn, event.get("lastUpdatedTime")
+                event_arn, event.get("lastUpdatedTime"), warnings
             )
 
             entities = await health_client.paginate(
@@ -139,11 +144,13 @@ async def get_affected_entities() -> str:
             sections.append("\n".join(lines))
 
         if not sections:
-            return "No affected entities found for any open events."
-        return "\n\n---\n\n".join(sections)
+            return "No affected entities found for any open events." + format_warnings(warnings)
+        return "\n\n---\n\n".join(sections) + format_warnings(warnings)
 
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching affected entities: {str(e)}"
+        raise ToolError(f"Error fetching affected entities: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -163,7 +170,7 @@ async def get_service_events(service: str, regions: list[str] | None = None) -> 
     try:
         has_access, error_message = await health_client.check_health_api_access()
         if not has_access:
-            return f"Cannot fetch health events: {error_message}"
+            raise ToolError(f"Cannot fetch health events: {error_message}")
 
         normalized_service, error = await _resolve_service(service)
         if not normalized_service:
@@ -178,12 +185,14 @@ async def get_service_events(service: str, regions: list[str] | None = None) -> 
             return f"No active health events found for service: {normalized_service}"
         return await format_events_batch(events, health_client)
 
+    except ToolError:
+        raise
     except ClientError as e:
         code = e.response["Error"]["Code"]
         msg = e.response["Error"]["Message"]
-        return f"AWS Health API error: {code} - {msg}"
+        raise ToolError(f"AWS Health API error: {code} - {msg}") from e
     except Exception as e:
-        return f"Error fetching AWS health events: {str(e)}"
+        raise ToolError(f"Error fetching AWS health events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -202,7 +211,7 @@ async def get_completed_events(service: str | None = None, regions: list[str] | 
     try:
         has_access, error_message = await health_client.check_health_api_access()
         if not has_access:
-            return f"Cannot fetch completed events: {error_message}"
+            raise ToolError(f"Cannot fetch completed events: {error_message}")
 
         filter_params: dict = {"eventStatusCodes": ["closed"]}
         normalized_service = None
@@ -220,12 +229,14 @@ async def get_completed_events(service: str | None = None, regions: list[str] | 
             return f"No completed health events found{svc}."
         return await format_events_batch(events, health_client)
 
+    except ToolError:
+        raise
     except ClientError as e:
         code = e.response["Error"]["Code"]
         msg = e.response["Error"]["Message"]
-        return f"AWS Health API error: {code} - {msg}"
+        raise ToolError(f"AWS Health API error: {code} - {msg}") from e
     except Exception as e:
-        return f"Error fetching completed events: {str(e)}"
+        raise ToolError(f"Error fetching completed events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -267,8 +278,10 @@ async def get_scheduled_changes(regions: list[str] | None = None) -> str:
 
         return "\n\n---\n\n".join(sections)
 
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching scheduled AWS changes: {str(e)}"
+        raise ToolError(f"Error fetching scheduled AWS changes: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -296,7 +309,7 @@ async def get_org_health_events(
     try:
         has_access, error_message = await health_client.check_org_health_access()
         if not has_access:
-            return f"Cannot fetch organization events: {error_message}"
+            raise ToolError(f"Cannot fetch organization events: {error_message}")
 
         if status.lower() == "active":
             status_codes = ["open", "upcoming"]
@@ -333,12 +346,14 @@ async def get_org_health_events(
 
         return await format_events_batch(events, health_client, include_accounts=True)
 
+    except ToolError:
+        raise
     except ClientError as e:
         code = e.response["Error"]["Code"]
         msg = e.response["Error"]["Message"]
-        return f"AWS Organizations Health API error: {code} - {msg}"
+        raise ToolError(f"AWS Organizations Health API error: {code} - {msg}") from e
     except Exception as e:
-        return f"Error fetching organization health events: {str(e)}"
+        raise ToolError(f"Error fetching organization health events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -355,7 +370,7 @@ async def get_org_service_health() -> str:
     try:
         has_access, error_message = await health_client.check_org_health_access()
         if not has_access:
-            return f"Cannot fetch organization events: {error_message}"
+            raise ToolError(f"Cannot fetch organization events: {error_message}")
 
         events = await health_client.paginate(
             "describe_events_for_organization",
@@ -365,8 +380,10 @@ async def get_org_service_health() -> str:
             return "No active AWS organization health events found."
         return await format_events_batch(events, health_client, include_accounts=True)
 
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching organization health events: {str(e)}"
+        raise ToolError(f"Error fetching organization health events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -386,7 +403,7 @@ async def get_org_affected_entities(
     try:
         has_access, error_message = await health_client.check_org_health_access()
         if not has_access:
-            return f"Cannot fetch organization events: {error_message}"
+            raise ToolError(f"Cannot fetch organization events: {error_message}")
 
         if event_arn:
             try:
@@ -399,7 +416,9 @@ async def get_org_affected_entities(
                 else:
                     return f"No event found with ARN: {event_arn}"
             except ClientError as e:
-                return f"AWS Organizations Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+                raise ToolError(
+                    f"AWS Organizations Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+                ) from e
         else:
             events = await health_client.paginate(
                 "describe_events_for_organization",
@@ -410,10 +429,13 @@ async def get_org_affected_entities(
             return "No open health events found in your organization."
 
         sections = []
+        warnings: list[str] = []
         for event in events:
             evt_arn = event["arn"]
-            desc = await health_client.get_event_description(evt_arn, event.get("lastUpdatedTime"))
-            affected_accounts = await health_client.get_affected_accounts(evt_arn)
+            desc = await health_client.get_event_description(
+                evt_arn, event.get("lastUpdatedTime"), warnings
+            )
+            affected_accounts = await health_client.get_affected_accounts(evt_arn, warnings)
 
             if account_id and account_id not in affected_accounts:
                 continue
@@ -426,7 +448,7 @@ async def get_org_affected_entities(
             entity_lines = [header, "", "**Affected Entities:**"]
 
             account_entities = await health_client.get_org_entities_batched(
-                evt_arn, target_accounts
+                evt_arn, target_accounts, warnings
             )
 
             for acc, entities in account_entities.items():
@@ -450,11 +472,13 @@ async def get_org_affected_entities(
 
         if not sections:
             acct_msg = f" for account {account_id}" if account_id else ""
-            return f"No affected entities found{acct_msg}."
-        return "\n\n---\n\n".join(sections)
+            return f"No affected entities found{acct_msg}." + format_warnings(warnings)
+        return "\n\n---\n\n".join(sections) + format_warnings(warnings)
 
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching organization affected entities: {str(e)}"
+        raise ToolError(f"Error fetching organization affected entities: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -472,7 +496,7 @@ async def get_org_service_events(service: str, regions: list[str] | None = None)
     try:
         has_access, error_message = await health_client.check_org_health_access()
         if not has_access:
-            return f"Cannot fetch organization events: {error_message}"
+            raise ToolError(f"Cannot fetch organization events: {error_message}")
 
         normalized_service, error = await _resolve_service(service)
         if not normalized_service:
@@ -489,12 +513,14 @@ async def get_org_service_events(service: str, regions: list[str] | None = None)
             return f"No active health events for {normalized_service} across your organization."
         return await format_events_batch(events, health_client, include_accounts=True)
 
+    except ToolError:
+        raise
     except ClientError as e:
         code = e.response["Error"]["Code"]
         msg = e.response["Error"]["Message"]
-        return f"AWS Organizations Health API error: {code} - {msg}"
+        raise ToolError(f"AWS Organizations Health API error: {code} - {msg}") from e
     except Exception as e:
-        return f"Error fetching organization service events: {str(e)}"
+        raise ToolError(f"Error fetching organization service events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -512,7 +538,7 @@ async def get_org_account_events(account_id: str, regions: list[str] | None = No
     try:
         has_access, error_message = await health_client.check_org_health_access()
         if not has_access:
-            return f"Cannot fetch organization events: {error_message}"
+            raise ToolError(f"Cannot fetch organization events: {error_message}")
 
         if not account_id.isdigit() or len(account_id) != 12:
             return f"Invalid account ID: {account_id}. Must be a 12-digit number."
@@ -530,17 +556,23 @@ async def get_org_account_events(account_id: str, regions: list[str] | None = No
             return f"No active health events found for account {account_id}."
 
         sections = []
+        warnings: list[str] = []
         for event in account_events:
             evt_arn = event["arn"]
-            desc = await health_client.get_event_description(evt_arn, event.get("lastUpdatedTime"))
-            accounts = await health_client.get_affected_accounts(evt_arn)
+            desc = await health_client.get_event_description(
+                evt_arn, event.get("lastUpdatedTime"), warnings
+            )
+            accounts = await health_client.get_affected_accounts(evt_arn, warnings)
 
             try:
                 entities = await health_client.paginate(
                     "describe_affected_entities_for_organization",
                     organizationEntityFilters=[{"eventArn": evt_arn, "awsAccountId": account_id}],
                 )
-            except Exception:
+            except Exception as e:
+                record_failure(
+                    warnings, f"resources unavailable for {evt_arn} in account {account_id}", e
+                )
                 entities = []
 
             header = format_event(event, desc)
@@ -565,10 +597,12 @@ async def get_org_account_events(account_id: str, regions: list[str] | None = No
 
             sections.append("\n".join(lines))
 
-        return "\n\n---\n\n".join(sections)
+        return "\n\n---\n\n".join(sections) + format_warnings(warnings)
 
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching account health events: {str(e)}"
+        raise ToolError(f"Error fetching account health events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -584,7 +618,7 @@ async def get_org_scheduled_changes() -> str:
     try:
         has_access, error_message = await health_client.check_org_health_access()
         if not has_access:
-            return f"Cannot fetch organization events: {error_message}"
+            raise ToolError(f"Cannot fetch organization events: {error_message}")
 
         events = await health_client.paginate(
             "describe_events_for_organization",
@@ -609,8 +643,10 @@ async def get_org_scheduled_changes() -> str:
 
         return "\n\n---\n\n".join(sections)
 
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching organization scheduled changes: {str(e)}"
+        raise ToolError(f"Error fetching organization scheduled changes: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -631,7 +667,10 @@ async def get_event_details(event_arns: list[str]) -> str:
         if not event_arns:
             return "No event ARNs provided."
 
-        descriptions = await health_client.get_event_descriptions_batched(event_arns)
+        warnings: list[str] = []
+        descriptions = await health_client.get_event_descriptions_batched(
+            event_arns, None, warnings
+        )
 
         # describe_event_details accepts up to 10 ARNs per call.
         details: dict[str, dict] = {}
@@ -640,7 +679,9 @@ async def get_event_details(event_arns: list[str]) -> str:
             try:
                 response = await health_client.call("describe_event_details", eventArns=batch)
             except ClientError as e:
-                return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+                raise ToolError(
+                    f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+                ) from e
             for entry in response.get("successfulSet", []):
                 event = entry.get("event", {})
                 if event.get("arn"):
@@ -655,10 +696,12 @@ async def get_event_details(event_arns: list[str]) -> str:
             body = format_event(event, descriptions.get(arn, "No description available"))
             sections.append(f"{body}\n\n**ARN:** `{arn}`")
 
-        return "\n\n---\n\n".join(sections)
+        return "\n\n---\n\n".join(sections) + format_warnings(warnings)
 
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error fetching event details: {str(e)}"
+        raise ToolError(f"Error fetching event details: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -727,10 +770,14 @@ async def summarize_health_events(group_by: str = "service", include_closed: boo
         lines.append("Use get_event_details or the listing tools to drill into any of these.")
         return "\n".join(lines)
 
+    except ToolError:
+        raise
     except ClientError as e:
-        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        raise ToolError(
+            f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        ) from e
     except Exception as e:
-        return f"Error summarizing health events: {str(e)}"
+        raise ToolError(f"Error summarizing health events: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -766,10 +813,14 @@ async def count_affected_entities(event_arns: list[str]) -> str:
             )
         return "\n".join(lines)
 
+    except ToolError:
+        raise
     except ClientError as e:
-        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        raise ToolError(
+            f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        ) from e
     except Exception as e:
-        return f"Error counting affected entities: {str(e)}"
+        raise ToolError(f"Error counting affected entities: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -786,7 +837,7 @@ async def list_affected_accounts(event_arn: str) -> str:
     try:
         has_access, error_message = await health_client.check_org_health_access()
         if not has_access:
-            return f"Cannot fetch affected accounts: {error_message}"
+            raise ToolError(f"Cannot fetch affected accounts: {error_message}")
 
         accounts = await health_client.get_affected_accounts(event_arn)
         if not accounts:
@@ -796,10 +847,14 @@ async def list_affected_accounts(event_arn: str) -> str:
         lines.extend(f"- {account}" for account in accounts)
         return "\n".join(lines)
 
+    except ToolError:
+        raise
     except ClientError as e:
-        return f"AWS Organizations Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        raise ToolError(
+            f"AWS Organizations Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        ) from e
     except Exception as e:
-        return f"Error fetching affected accounts: {str(e)}"
+        raise ToolError(f"Error fetching affected accounts: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -873,10 +928,14 @@ async def list_event_types(service: str | None = None, category: str | None = No
             sections.append("\n".join(lines))
         return "\n\n".join(sections)
 
+    except ToolError:
+        raise
     except ClientError as e:
-        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        raise ToolError(
+            f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        ) from e
     except Exception as e:
-        return f"Error listing event types: {str(e)}"
+        raise ToolError(f"Error listing event types: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
@@ -913,13 +972,22 @@ async def find_events_for_resources(entity_values: list[str], include_closed: bo
             return "No health events to search."
 
         events_by_arn = {e["arn"]: e for e in events if e.get("arn")}
-        matches = await health_client.find_entities_for_values(list(events_by_arn), entity_values)
+        warnings: list[str] = []
+        matches = await health_client.find_entities_for_values(
+            list(events_by_arn), entity_values, warnings
+        )
         if not matches:
             searched = ", ".join(entity_values)
+            if warnings:
+                # Events that could not be checked make "nothing found" a guess.
+                raise ToolError(
+                    f"Could not finish searching for {searched}; no match was found in the "
+                    f"events that were checked.{format_warnings(warnings)}"
+                )
             return f"No health events affect {searched} " f"(searched {len(events_by_arn)} events)."
 
         descriptions = await health_client.get_event_descriptions_batched(
-            list(matches), last_updated_by_arn(events)
+            list(matches), last_updated_by_arn(events), warnings
         )
 
         sections = []
@@ -935,12 +1003,16 @@ async def find_events_for_resources(entity_values: list[str], include_closed: bo
             f"**{len(matches)} event(s)** affect the {len(entity_values)} "
             f"resource(s) you asked about.\n"
         )
-        return header + "\n\n---\n\n".join(sections)
+        return header + "\n\n---\n\n".join(sections) + format_warnings(warnings)
 
+    except ToolError:
+        raise
     except ClientError as e:
-        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        raise ToolError(
+            f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        ) from e
     except Exception as e:
-        return f"Error searching events for resources: {str(e)}"
+        raise ToolError(f"Error searching events for resources: {str(e)}") from e
 
 
 @mcp.tool(annotations=_READ_ONLY)
