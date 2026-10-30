@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.1
+
+No behaviour changes; documentation and comments only.
 
 ### Documentation
 - Documented how regions and failover work: the client uses the global Health
