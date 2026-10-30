@@ -83,6 +83,19 @@ class HealthClient:
 
             return await asyncio.to_thread(_sync)
 
+    async def get_caller_identity(self) -> Optional[dict]:
+        """Return the calling identity via STS, or None if credentials are unusable."""
+
+        def _sync():
+            session = boto3.Session(profile_name=Config.AWS_PROFILE)
+            return session.client("sts").get_caller_identity()
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except Exception as e:
+            logger.warning("Could not resolve AWS caller identity: %s", e)
+            return None
+
     async def get_known_services(self) -> Optional[list[str]]:
         """Return every service code AWS Health knows about, or None if unavailable.
 

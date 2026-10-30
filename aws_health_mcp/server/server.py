@@ -1,19 +1,32 @@
 """Main MCP server implementation for AWS Health API."""
 
 import asyncio
+from datetime import datetime, timezone
 
 from botocore.exceptions import ClientError
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from .client import health_client
 from .formatters import (
     format_entity,
     format_event,
     format_events_batch,
+    format_timestamp,
     validate_service_name,
 )
 
 mcp = FastMCP("aws-health")
+
+# Every tool here only ever reads. AWS Health's two mutating operations
+# (Enable/DisableHealthServiceAccessForOrganization) are deliberately not
+# exposed: org-wide Health access is not configuration an agent should toggle.
+_READ_ONLY = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
 
 
 async def _resolve_service(service: str) -> tuple[str | None, str]:
@@ -37,7 +50,7 @@ async def _resolve_service(service: str) -> tuple[str | None, str]:
     return None, f"Unknown AWS service: {service}.{hint}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_service_health() -> str:
     """Get current AWS service health events.
 
@@ -59,7 +72,7 @@ async def get_service_health() -> str:
         return f"Error fetching AWS health events: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_affected_entities() -> str:
     """Get affected entities for all open AWS health events.
 
@@ -113,7 +126,7 @@ async def get_affected_entities() -> str:
         return f"Error fetching affected entities: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_service_events(service: str) -> str:
     """Get health events for a specific AWS service.
 
@@ -150,7 +163,7 @@ async def get_service_events(service: str) -> str:
         return f"Error fetching AWS health events: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_completed_events(service: str | None = None) -> str:
     """Get completed/closed health events.
 
@@ -190,7 +203,7 @@ async def get_completed_events(service: str | None = None) -> str:
         return f"Error fetching completed events: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_scheduled_changes() -> str:
     """Get all scheduled changes/maintenance events across AWS services.
 
@@ -229,7 +242,7 @@ async def get_scheduled_changes() -> str:
         return f"Error fetching scheduled AWS changes: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_org_health_events(
     service: str | None = None, account_id: str | None = None, status: str = "active"
 ) -> str:
@@ -295,7 +308,7 @@ async def get_org_health_events(
         return f"Error fetching organization health events: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_org_service_health() -> str:
     """Get current AWS service health events across your organization.
 
@@ -323,7 +336,7 @@ async def get_org_service_health() -> str:
         return f"Error fetching organization health events: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_org_affected_entities(
     account_id: str | None = None, event_arn: str | None = None
 ) -> str:
@@ -411,7 +424,7 @@ async def get_org_affected_entities(
         return f"Error fetching organization affected entities: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_org_service_events(service: str) -> str:
     """Get health events for a specific AWS service across your organization.
 
@@ -447,7 +460,7 @@ async def get_org_service_events(service: str) -> str:
         return f"Error fetching organization service events: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_org_account_events(account_id: str) -> str:
     """Get health events for a specific AWS account in your organization.
 
@@ -525,7 +538,7 @@ async def get_org_account_events(account_id: str) -> str:
         return f"Error fetching account health events: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_org_scheduled_changes() -> str:
     """Get scheduled changes/maintenance events across your AWS Organization.
 
@@ -565,6 +578,330 @@ async def get_org_scheduled_changes() -> str:
 
     except Exception as e:
         return f"Error fetching organization scheduled changes: {str(e)}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def get_event_details(event_arns: list[str]) -> str:
+    """Get the full detail of specific AWS health events by ARN.
+
+    Use this to drill into events surfaced by the listing tools, instead of
+    pulling every description for every event.
+
+    Args:
+        event_arns: One or more event ARNs, as returned by the listing tools.
+
+    Example prompts:
+    - "Give me the full details of that EC2 retirement event"
+    - "What exactly does event arn:aws:health:... say?"
+    """
+    try:
+        if not event_arns:
+            return "No event ARNs provided."
+
+        descriptions = await health_client.get_event_descriptions_batched(event_arns)
+
+        # describe_event_details accepts up to 10 ARNs per call.
+        details: dict[str, dict] = {}
+        for i in range(0, len(event_arns), 10):
+            batch = event_arns[i : i + 10]
+            try:
+                response = await health_client.call("describe_event_details", eventArns=batch)
+            except ClientError as e:
+                return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+            for entry in response.get("successfulSet", []):
+                event = entry.get("event", {})
+                if event.get("arn"):
+                    details[event["arn"]] = event
+
+        sections = []
+        for arn in event_arns:
+            event = details.get(arn)
+            if event is None:
+                sections.append(f"## {arn}\n\nNo detail available for this ARN.")
+                continue
+            body = format_event(event, descriptions.get(arn, "No description available"))
+            sections.append(f"{body}\n\n**ARN:** `{arn}`")
+
+        return "\n\n---\n\n".join(sections)
+
+    except Exception as e:
+        return f"Error fetching event details: {str(e)}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def summarize_health_events(group_by: str = "service", include_closed: bool = False) -> str:
+    """Count active AWS health events without returning their descriptions.
+
+    A cheap overview for "is anything wrong?" questions. Listing tools return
+    full descriptions and can run to tens of thousands of tokens; this returns
+    counts only.
+
+    Args:
+        group_by: One of 'service', 'status', 'category' or 'region'.
+        include_closed: Include resolved events as well as open/upcoming ones.
+
+    Example prompts:
+    - "How many AWS health events are open, by service?"
+    - "Give me a summary of current AWS issues"
+    - "Which regions have active events?"
+    """
+    try:
+        valid_groups = ("service", "status", "category", "region")
+        key = group_by.lower().strip()
+        if key not in valid_groups:
+            return f"Invalid group_by: {group_by}. Use one of: {', '.join(valid_groups)}."
+
+        status_codes = ["open", "upcoming"]
+        if include_closed:
+            status_codes.append("closed")
+
+        # eventTypeCategory is the only field DescribeEventAggregates supports,
+        # so it is the one grouping AWS can count server-side.
+        if key == "category":
+            response = await health_client.call(
+                "describe_event_aggregates",
+                aggregateField="eventTypeCategory",
+                filter={"eventStatusCodes": status_codes},
+            )
+            counts = {
+                a.get("aggregateValue", "unknown"): a.get("count", 0)
+                for a in response.get("eventAggregates", [])
+            }
+        else:
+            events = await health_client.paginate(
+                "describe_events", filter={"eventStatusCodes": status_codes}
+            )
+            field = {"service": "service", "status": "statusCode", "region": "region"}[key]
+            counts = {}
+            for event in events:
+                value = event.get(field) or "unknown"
+                counts[value] = counts.get(value, 0) + 1
+
+        if not counts:
+            return "No health events found."
+
+        total = sum(counts.values())
+        scope = "open, upcoming and closed" if include_closed else "open and upcoming"
+        lines = [
+            f"**{total} health events** ({scope}), by {key}:",
+            "",
+            f"| {key.capitalize()} | Events |",
+            "|---|---|",
+        ]
+        for value, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            lines.append(f"| {value} | {count} |")
+        lines.append("")
+        lines.append("Use get_event_details or the listing tools to drill into any of these.")
+        return "\n".join(lines)
+
+    except ClientError as e:
+        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+    except Exception as e:
+        return f"Error summarizing health events: {str(e)}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def count_affected_entities(event_arns: list[str]) -> str:
+    """Count the resources affected by events, without listing them.
+
+    Use this before the entity-listing tools when an event could touch
+    thousands of resources.
+
+    Args:
+        event_arns: One or more event ARNs.
+
+    Example prompts:
+    - "How many instances does this retirement event affect?"
+    - "What's the blast radius of these events?"
+    """
+    try:
+        if not event_arns:
+            return "No event ARNs provided."
+
+        response = await health_client.call("describe_entity_aggregates", eventArns=event_arns)
+        aggregates = response.get("entityAggregates", [])
+        if not aggregates:
+            return "No affected entities found for the given events."
+
+        lines = ["| Event ARN | Affected entities | By status |", "|---|---|---|"]
+        for aggregate in aggregates:
+            statuses = aggregate.get("statuses") or {}
+            breakdown = ", ".join(f"{k}: {v}" for k, v in statuses.items()) or "-"
+            lines.append(
+                f"| `{aggregate.get('eventArn', 'unknown')}` "
+                f"| {aggregate.get('count', 0)} | {breakdown} |"
+            )
+        return "\n".join(lines)
+
+    except ClientError as e:
+        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+    except Exception as e:
+        return f"Error counting affected entities: {str(e)}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def list_affected_accounts(event_arn: str) -> str:
+    """List the organization accounts affected by a single health event.
+
+    Args:
+        event_arn: The ARN of an organization health event.
+
+    Example prompts:
+    - "Which accounts does this event affect?"
+    - "How wide is the blast radius of this event across my organization?"
+    """
+    try:
+        has_access, error_message = await health_client.check_org_health_access()
+        if not has_access:
+            return f"Cannot fetch affected accounts: {error_message}"
+
+        accounts = await health_client.get_affected_accounts(event_arn)
+        if not accounts:
+            return f"No affected accounts found for {event_arn}."
+
+        lines = [f"**{len(accounts)} affected account(s)** for `{event_arn}`:", ""]
+        lines.extend(f"- {account}" for account in accounts)
+        return "\n".join(lines)
+
+    except ClientError as e:
+        return f"AWS Organizations Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+    except Exception as e:
+        return f"Error fetching affected accounts: {str(e)}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def list_event_types(service: str | None = None, category: str | None = None) -> str:
+    """List the event types AWS Health can report, optionally for one service.
+
+    Also the way to discover valid service names: the service codes AWS Health
+    uses do not always match the marketing name (Step Functions is 'STATES',
+    EventBridge is 'EVENTS').
+
+    Args:
+        service: Optional. Restrict to one AWS service. Case insensitive.
+        category: Optional. One of 'issue', 'accountNotification',
+            'scheduledChange', 'investigation'.
+
+    Example prompts:
+    - "What service names does AWS Health use?"
+    - "What kinds of EC2 events can AWS Health report?"
+    """
+    try:
+        filter_params: dict = {}
+
+        if service:
+            normalized_service, error = await _resolve_service(service)
+            if not normalized_service:
+                return error
+            filter_params["services"] = [normalized_service]
+
+        if category:
+            valid_categories = (
+                "issue",
+                "accountNotification",
+                "scheduledChange",
+                "investigation",
+            )
+            match = next((c for c in valid_categories if c.lower() == category.lower()), None)
+            if match is None:
+                return f"Invalid category: {category}. Use one of: {', '.join(valid_categories)}."
+            filter_params["eventTypeCategories"] = [match]
+
+        if not filter_params:
+            # Unfiltered, this is ~5000 event types. Return the service index,
+            # which is what "what can I ask about?" actually means.
+            services = await health_client.get_known_services()
+            if not services:
+                return "Could not reach AWS Health to list services."
+            lines = [
+                f"AWS Health covers **{len(services)} services**. "
+                "Pass `service` to see the event types for one of them.",
+                "",
+            ]
+            lines.extend(f"- {code}" for code in services)
+            return "\n".join(lines)
+
+        event_types = await health_client.paginate("describe_event_types", filter=filter_params)
+        if not event_types:
+            return "No matching event types found."
+
+        by_service: dict[str, list[dict]] = {}
+        for event_type in event_types:
+            by_service.setdefault(event_type.get("service", "unknown"), []).append(event_type)
+
+        sections = []
+        for svc, types in sorted(by_service.items()):
+            lines = [f"## {svc} ({len(types)} event types)", "", "| Code | Category |", "|---|---|"]
+            for event_type in sorted(types, key=lambda t: t.get("code", "")):
+                lines.append(
+                    f"| {event_type.get('code', 'unknown')} "
+                    f"| {event_type.get('category', '-')} |"
+                )
+            sections.append("\n".join(lines))
+        return "\n\n".join(sections)
+
+    except ClientError as e:
+        return f"AWS Health API error: {e.response['Error']['Code']} - {e.response['Error']['Message']}"
+    except Exception as e:
+        return f"Error listing event types: {str(e)}"
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def check_health_access() -> str:
+    """Diagnose whether this server can actually reach the AWS Health API.
+
+    Reports the calling identity, whether the account's support plan allows
+    Health API access, and whether organization view is enabled. Run this first
+    when other tools return access errors.
+
+    Example prompts:
+    - "Why can't you see my AWS health events?"
+    - "Is AWS Health set up correctly?"
+    - "Do I have organization-wide health access?"
+    """
+    lines = ["# AWS Health access check", ""]
+
+    identity = await health_client.get_caller_identity()
+    if identity:
+        lines.append(f"- **Credentials:** ok — account `{identity.get('Account', 'unknown')}`")
+        lines.append(f"- **Identity:** `{identity.get('Arn', 'unknown')}`")
+    else:
+        lines.append("- **Credentials:** FAILED — no usable AWS credentials.")
+        lines.append("  Configure `aws configure`, or set `AWS_PROFILE` for this server.")
+
+    has_access, error_message = await health_client.check_health_api_access()
+    if has_access:
+        lines.append("- **Health API (account):** ok")
+    else:
+        lines.append(f"- **Health API (account):** FAILED — {error_message}")
+        if error_message and "Business or Enterprise" in error_message:
+            lines.append(
+                "  The Health API requires a Business or Enterprise Support plan. "
+                "Account-level tools will not work without one."
+            )
+        else:
+            lines.append("  The calling principal needs `health:Describe*` permissions.")
+
+    org_access, org_error = await health_client.check_org_health_access()
+    if org_access:
+        lines.append("- **Health API (organization):** ok")
+    else:
+        lines.append(f"- **Health API (organization):** unavailable — {org_error}")
+        lines.append(
+            "  Org-level tools need this enabled from the management account: "
+            "`aws health enable-health-service-access-for-organization`"
+        )
+
+    services = await health_client.get_known_services()
+    lines.append(
+        f"- **Service catalog:** {len(services)} services loaded"
+        if services
+        else "- **Service catalog:** unavailable — service names cannot be validated"
+    )
+
+    lines.append("")
+    lines.append(f"Checked at {format_timestamp(datetime.now(timezone.utc))}.")
+    return "\n".join(lines)
 
 
 def run_server():

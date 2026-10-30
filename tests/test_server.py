@@ -373,3 +373,239 @@ class TestServerTools:
 
         result = await get_org_health_events(status="invalid")
         assert "Invalid status" in result
+
+
+class TestNewReadOnlyTools:
+    @pytest.fixture(autouse=True)
+    def mock_health_client(self):
+        with patch("aws_health_mcp.server.server.health_client") as mock:
+            self.mock_client = mock
+            yield mock
+
+    @pytest.mark.asyncio
+    async def test_get_event_details_empty_input(self):
+        from aws_health_mcp.server.server import get_event_details
+
+        assert "No event ARNs provided" in await get_event_details([])
+
+    @pytest.mark.asyncio
+    async def test_get_event_details_formats_event(self):
+        self.mock_client.get_event_descriptions_batched = AsyncMock(
+            return_value={"arn:evt:1": "Instance is being retired"}
+        )
+        self.mock_client.call = AsyncMock(
+            return_value={
+                "successfulSet": [
+                    {
+                        "event": {
+                            "arn": "arn:evt:1",
+                            "service": "EC2",
+                            "eventTypeCode": "AWS_EC2_INSTANCE_RETIREMENT",
+                            "statusCode": "upcoming",
+                            "region": "us-east-1",
+                        }
+                    }
+                ],
+                "failedSet": [],
+            }
+        )
+        from aws_health_mcp.server.server import get_event_details
+
+        result = await get_event_details(["arn:evt:1"])
+        assert "AWS_EC2_INSTANCE_RETIREMENT" in result
+        assert "Instance is being retired" in result
+        assert "arn:evt:1" in result
+
+    @pytest.mark.asyncio
+    async def test_get_event_details_reports_unknown_arn(self):
+        self.mock_client.get_event_descriptions_batched = AsyncMock(return_value={})
+        self.mock_client.call = AsyncMock(return_value={"successfulSet": [], "failedSet": []})
+        from aws_health_mcp.server.server import get_event_details
+
+        result = await get_event_details(["arn:missing"])
+        assert "No detail available" in result
+
+    @pytest.mark.asyncio
+    async def test_get_event_details_batches_by_ten(self):
+        """describe_event_details caps eventArns at 10 per call."""
+        arns = [f"arn:evt:{i}" for i in range(25)]
+        self.mock_client.get_event_descriptions_batched = AsyncMock(return_value={})
+        self.mock_client.call = AsyncMock(return_value={"successfulSet": [], "failedSet": []})
+        from aws_health_mcp.server.server import get_event_details
+
+        await get_event_details(arns)
+        assert self.mock_client.call.await_count == 3
+        for call_args in self.mock_client.call.await_args_list:
+            assert len(call_args.kwargs["eventArns"]) <= 10
+
+    @pytest.mark.asyncio
+    async def test_summarize_rejects_bad_group_by(self):
+        from aws_health_mcp.server.server import summarize_health_events
+
+        assert "Invalid group_by" in await summarize_health_events(group_by="colour")
+
+    @pytest.mark.asyncio
+    async def test_summarize_counts_by_service_without_descriptions(self):
+        """The summary must not pull descriptions -- that is the token blow-up."""
+        self.mock_client.paginate = AsyncMock(
+            return_value=[
+                {"service": "EC2", "statusCode": "open", "region": "us-east-1"},
+                {"service": "EC2", "statusCode": "open", "region": "us-west-2"},
+                {"service": "RDS", "statusCode": "upcoming", "region": "us-east-1"},
+            ]
+        )
+        from aws_health_mcp.server.server import summarize_health_events
+
+        result = await summarize_health_events(group_by="service")
+        assert "3 health events" in result
+        assert "| EC2 | 2 |" in result
+        assert "| RDS | 1 |" in result
+        self.mock_client.get_event_descriptions_batched.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_summarize_by_category_uses_server_side_aggregate(self):
+        """eventTypeCategory is the only field DescribeEventAggregates supports."""
+        self.mock_client.call = AsyncMock(
+            return_value={
+                "eventAggregates": [
+                    {"aggregateValue": "scheduledChange", "count": 44},
+                    {"aggregateValue": "issue", "count": 2},
+                ]
+            }
+        )
+        from aws_health_mcp.server.server import summarize_health_events
+
+        result = await summarize_health_events(group_by="category")
+        assert "46 health events" in result
+        assert "| scheduledChange | 44 |" in result
+        assert self.mock_client.call.await_args.kwargs["aggregateField"] == "eventTypeCategory"
+
+    @pytest.mark.asyncio
+    async def test_summarize_no_events(self):
+        self.mock_client.paginate = AsyncMock(return_value=[])
+        from aws_health_mcp.server.server import summarize_health_events
+
+        assert "No health events found" in await summarize_health_events(group_by="region")
+
+    @pytest.mark.asyncio
+    async def test_count_affected_entities(self):
+        self.mock_client.call = AsyncMock(
+            return_value={
+                "entityAggregates": [
+                    {"eventArn": "arn:evt:1", "count": 42, "statuses": {"IMPAIRED": 42}}
+                ]
+            }
+        )
+        from aws_health_mcp.server.server import count_affected_entities
+
+        result = await count_affected_entities(["arn:evt:1"])
+        assert "42" in result
+        assert "IMPAIRED: 42" in result
+
+    @pytest.mark.asyncio
+    async def test_count_affected_entities_empty_input(self):
+        from aws_health_mcp.server.server import count_affected_entities
+
+        assert "No event ARNs provided" in await count_affected_entities([])
+
+    @pytest.mark.asyncio
+    async def test_list_affected_accounts(self):
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(True, None))
+        self.mock_client.get_affected_accounts = AsyncMock(
+            return_value=["111111111111", "222222222222"]
+        )
+        from aws_health_mcp.server.server import list_affected_accounts
+
+        result = await list_affected_accounts("arn:evt:1")
+        assert "2 affected account(s)" in result
+        assert "111111111111" in result
+
+    @pytest.mark.asyncio
+    async def test_list_affected_accounts_no_org_access(self):
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(False, "Not enabled"))
+        from aws_health_mcp.server.server import list_affected_accounts
+
+        assert "Not enabled" in await list_affected_accounts("arn:evt:1")
+
+    @pytest.mark.asyncio
+    async def test_list_event_types_unfiltered_returns_service_index(self):
+        self.mock_client.get_known_services = AsyncMock(return_value=["EC2", "RDS", "STATES"])
+        from aws_health_mcp.server.server import list_event_types
+
+        result = await list_event_types()
+        assert "3 services" in result
+        assert "STATES" in result
+
+    @pytest.mark.asyncio
+    async def test_list_event_types_for_service(self):
+        self.mock_client.get_known_services = AsyncMock(return_value=["STATES"])
+        self.mock_client.paginate = AsyncMock(
+            return_value=[
+                {"service": "STATES", "code": "AWS_STATES_OPERATIONAL_ISSUE", "category": "issue"}
+            ]
+        )
+        from aws_health_mcp.server.server import list_event_types
+
+        result = await list_event_types(service="Step Functions")
+        assert "STATES" in result
+        assert "AWS_STATES_OPERATIONAL_ISSUE" in result
+
+    @pytest.mark.asyncio
+    async def test_list_event_types_rejects_bad_category(self):
+        self.mock_client.get_known_services = AsyncMock(return_value=["EC2"])
+        from aws_health_mcp.server.server import list_event_types
+
+        assert "Invalid category" in await list_event_types(category="nonsense")
+
+    @pytest.mark.asyncio
+    async def test_check_health_access_all_ok(self):
+        self.mock_client.get_caller_identity = AsyncMock(
+            return_value={"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/dev"}
+        )
+        self.mock_client.check_health_api_access = AsyncMock(return_value=(True, None))
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(True, None))
+        self.mock_client.get_known_services = AsyncMock(return_value=["EC2"])
+        from aws_health_mcp.server.server import check_health_access
+
+        result = await check_health_access()
+        assert "123456789012" in result
+        assert "**Health API (account):** ok" in result
+        assert "**Health API (organization):** ok" in result
+
+    @pytest.mark.asyncio
+    async def test_check_health_access_explains_subscription_requirement(self):
+        self.mock_client.get_caller_identity = AsyncMock(return_value=None)
+        self.mock_client.check_health_api_access = AsyncMock(
+            return_value=(
+                False,
+                "AWS Health API requires Business or Enterprise Support subscription",
+            )
+        )
+        self.mock_client.check_org_health_access = AsyncMock(return_value=(False, "Not enabled"))
+        self.mock_client.get_known_services = AsyncMock(return_value=None)
+        from aws_health_mcp.server.server import check_health_access
+
+        result = await check_health_access()
+        assert "Credentials:** FAILED" in result
+        assert "Business or Enterprise Support plan" in result
+        assert "enable-health-service-access-for-organization" in result
+
+
+class TestToolAnnotations:
+    def test_all_tools_declared_read_only(self):
+        """No tool here mutates; clients should be able to see that."""
+        from aws_health_mcp.server.server import mcp
+
+        tools = asyncio.run(mcp.list_tools())
+        assert len(tools) == 17
+        for tool in tools:
+            assert tool.annotations is not None, f"{tool.name} has no annotations"
+            assert tool.annotations.readOnlyHint is True, f"{tool.name} not read-only"
+            assert tool.annotations.destructiveHint is False, f"{tool.name} marked destructive"
+
+    def test_no_mutating_health_operations_exposed(self):
+        """Enable/DisableHealthServiceAccessForOrganization must stay unexposed."""
+        from aws_health_mcp.server.server import mcp
+
+        names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+        assert not any("enable" in n or "disable" in n for n in names)
